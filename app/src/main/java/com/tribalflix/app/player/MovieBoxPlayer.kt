@@ -4,12 +4,9 @@ import android.content.Context
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioAttributes
+import androidx.media3.common.DefaultMediaSourceFactory
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.extractor.DefaultExtractorsFactory
-import androidx.media3.source.MediaSource
-import androidx.media3.source.ProgressiveMediaSource
-import androidx.media3.source.dash.DashMediaSource
 import androidx.media3.trackselection.DefaultTrackSelector
 
 /**
@@ -92,16 +89,10 @@ class MovieBoxPlayer private constructor(
     /** Loads a playable source with its required headers. */
     fun load(source: PlayableSource, headers: Map<String, String>) {
         currentSource = source
-
-        val mediaItem = MediaItem.fromUri(source.url)
-        val mediaSource = when {
-            source.format.equals("DASH", ignoreCase = true) || source.url.contains(".mpd") ->
-                buildDashSource(mediaItem, headers)
-            else ->
-                buildProgressiveSource(mediaItem, headers)
-        }
-
-        player.setMediaSource(mediaSource)
+        val dataSourceFactory = DefaultHttpDataSource.Factory()
+            .setDefaultRequestProperties(headers)
+        player.setMediaSourceFactory(DefaultMediaSourceFactory(context, dataSourceFactory))
+        player.setMediaItem(MediaItem.fromUri(source.url))
         player.prepare()
     }
 
@@ -135,24 +126,6 @@ class MovieBoxPlayer private constructor(
     /** Sets volume (0.0 to 1.0). */
     fun setVolume(volume: Float) {
         player.setVolume(volume)
-    }
-
-    // ── internal source builders ──
-
-    private fun buildDashSource(mediaItem: MediaItem, headers: Map<String, String>): MediaSource {
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
-            .setDefaultRequestProperties(headers)
-        return DashMediaSource.Factory(dataSourceFactory)
-            .setExtractorsFactory(DefaultExtractorsFactory())
-            .createMediaSource(mediaItem)
-    }
-
-    private fun buildProgressiveSource(mediaItem: MediaItem, headers: Map<String, String>): MediaSource {
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
-            .setDefaultRequestProperties(headers)
-        return ProgressiveMediaSource.Factory(dataSourceFactory)
-            .setExtractorsFactory(DefaultExtractorsFactory())
-            .createMediaSource(mediaItem)
     }
 
     companion object {

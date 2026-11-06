@@ -1,6 +1,7 @@
 package com.tribalflix.app.ui
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -15,6 +16,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.rememberImagePainter
+import coil.request.ImageRequest
 import com.tribalflix.app.api.SearchSubject
 import com.tribalflix.app.api.CaptionTrack
 import com.tribalflix.app.player.*
@@ -164,8 +166,11 @@ private fun SearchScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             subject.poster?.let {
+                                val imageRequest = ImageRequest.Builder(LocalContext.current)
+                                    .data(it)
+                                    .build()
                                 Image(
-                                    painter = rememberImagePainter(request = subject.poster!!),
+                                    painter = rememberImagePainter(request = imageRequest),
                                     contentDescription = null,
                                     modifier = Modifier
                                         .size(64.dp)
