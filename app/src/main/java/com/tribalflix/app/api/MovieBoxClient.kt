@@ -109,9 +109,11 @@ class MovieBoxClient(
         val uid = response.optString("uid") ?: response.optString("userId")
         val exp = response.optLong("exp", -1).takeIf { it > 0 }
 
-        this.token = token
-        this.userId = uid
-        this.expiresAt = exp ?: 0
+        // Inside withContext the implicit receiver is the CoroutineScope, so the
+        // client's own fields must be qualified explicitly.
+        this@MovieBoxClient.token = token
+        this@MovieBoxClient.userId = uid
+        this@MovieBoxClient.expiresAt = exp ?: 0
 
         VisitorLoginResult(token = token, userId = uid, expiresAt = exp)
     }
@@ -373,13 +375,14 @@ class MovieBoxClient(
 
                 // Capture x-user header (may contain refreshed token)
                 val xUser = response.header("x-user")
-                if (xUser.isNotBlank()) {
+                if (!xUser.isNullOrBlank()) {
                     try {
                         val userData = JSONObject(xUser)
                         val newToken = userData.optString("token")
                         if (newToken.isNotBlank()) {
-                            this.token = newToken
-                            this.userId = userData.optString("uid", userData.optString("userId"))
+                            this@MovieBoxClient.token = newToken
+                            this@MovieBoxClient.userId =
+                                userData.optString("uid", userData.optString("userId"))
                         }
                     } catch (e: Exception) { /* ignore */ }
                 }
@@ -535,7 +538,9 @@ fun extractEdgeCacheManifest(signCookie: String): String? {
         val norm = part.replace("-", "+").replace("_", "/") + "=".repeat(pad)
         val decUrl = String(java.util.Base64.getDecoder().decode(norm)).removeSuffix("*/")
         return if ("/dash/" in decUrl) "$decUrl/index.mpd" else null
-    } catch (e: Exception) { null }
+    } catch (e: Exception) {
+        return null
+    }
 }
 
 /** Extracts MPD URL from CloudFront-Policy cookie. */
@@ -550,5 +555,7 @@ fun extractCloudFrontManifest(signCookie: String): String? {
         val policy = JSONObject(String(java.util.Base64.getDecoder().decode(norm)))
         val resource = policy.optJSONArray("Statement")?.optJSONObject(0)?.optString("Resource", "") ?: ""
         return if ("/dash/" in resource) resource.removeSuffix("*/") + "/index.mpd" else null
-    } catch (e: Exception) { null }
+    } catch (e: Exception) {
+        return null
+    }
 }

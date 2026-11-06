@@ -9,19 +9,33 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.ui.PlayerView
 import com.tribalflix.app.api.PlayableSource
 
 /**
  * Media3 ExoPlayer wrapper for TribalFlix playback.
- * Applies per-stream headers (User-Agent, Referer, Cookie) to every request.
+ * Applies per-stream headers (User-Agent, Referer, Cookie) to every request,
+ * including DASH manifest and segment requests.
+ *
+ * The media-source factory is fixed when the player is built. Each stream's
+ * headers are applied by mutating [httpDataSourceFactory] just before prepare,
+ * because data sources are created lazily from that same factory instance.
  */
 class MovieBoxPlayer private constructor(private val context: Context) {
 
     private val trackSelector = DefaultTrackSelector(context)
 
+    private val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+
+    private val mediaSourceFactory = DefaultMediaSourceFactory(
+        httpDataSourceFactory,
+        DefaultExtractorsFactory()
+    )
+
     private val player: ExoPlayer = ExoPlayer.Builder(context)
         .setTrackSelector(trackSelector)
+        .setMediaSourceFactory(mediaSourceFactory)
         .setAudioAttributes(
             AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).build(),
             /* handleAudioFocus = */ true
@@ -77,9 +91,9 @@ class MovieBoxPlayer private constructor(private val context: Context) {
     /** Loads a playable source with its required headers. */
     fun load(source: PlayableSource, headers: Map<String, String>) {
         currentSource = source
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
-            .setDefaultRequestProperties(headers)
-        player.setMediaSourceFactory(DefaultMediaSourceFactory(context, dataSourceFactory))
+        // Explicit User-Agent wins over the data source's default UA.
+        httpDataSourceFactory.setUserAgent(source.userAgent)
+        httpDataSourceFactory.setDefaultRequestProperties(headers)
         player.setMediaItem(MediaItem.fromUri(source.url))
         player.prepare()
     }
