@@ -7,6 +7,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.net.Proxy
 import java.net.URLEncoder
 import kotlin.random.Random
 import java.util.*
@@ -348,10 +349,12 @@ class MovieBoxClient(
         if (pathAndQuery != PATH_VISITOR_LOGIN) ensureSession()
 
         var lastError: Exception? = null
+        val failures = mutableListOf<String>()
         val attempts = hostPool.size
         for (i in 0 until attempts) {
             val idx = (activeHostIdx + i) % hostPool.size
             val base = hostPool[idx]
+            val host = base.substringAfter("//")
             val url = "$base$pathAndQuery"
             val headers = buildHeaders(method, url, body)
 
@@ -394,11 +397,13 @@ class MovieBoxClient(
                     if (pathAndQuery != PATH_VISITOR_LOGIN) {
                         try { visitorLogin(); continue } catch (e: Exception) { /* fall through */ }
                     }
+                    failures += "$host HTTP ${response.code} ${responseBody.take(120).replace('\n', ' ')}"
                     lastError = RuntimeException("HTTP ${response.code} for $method $url")
                     continue
                 }
 
                 if (!response.isSuccessful) {
+                    failures += "$host HTTP ${response.code} ${responseBody.take(120).replace('\n', ' ')}"
                     lastError = RuntimeException("HTTP ${response.code} for $method $url")
                     continue
                 }
@@ -411,11 +416,16 @@ class MovieBoxClient(
                     payload
                 }
             } catch (e: Exception) {
+                failures += "$host ${e.javaClass.simpleName}: ${e.message}"
                 lastError = e
                 continue
             }
         }
-        throw lastError ?: RuntimeException("All hosts exhausted for $method $pathAndQuery")
+        throw RuntimeException(
+            "All $attempts hosts failed for $method $pathAndQuery -> " +
+                failures.joinToString(" | "),
+            lastError
+        )
     }
 
     private fun buildHeaders(method: String, url: String, body: String?): Map<String, String> {
@@ -470,6 +480,13 @@ private fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
     .readTimeout(15, TimeUnit.SECONDS)
     .writeTimeout(15, TimeUnit.SECONDS)
     .retryOnConnectionFailure(true)
+    // Transport parity with the known-good Python client (urllib):
+    // urllib ignores the platform proxy and speaks HTTP/1.1 only. OkHttp
+    // otherwise honours Android's system proxy and may negotiate HTTP/2,
+    // which is the remaining difference on-device (a bare 407 on a direct
+    // connection).
+    .proxy(Proxy.NO_PROXY)
+    .protocols(listOf(Protocol.HTTP_1_1))
     .build()
 
 private fun generateDeviceProfile(): DeviceProfile {

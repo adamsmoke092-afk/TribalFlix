@@ -142,8 +142,11 @@ fun generateXClientToken(timestampMs: Long): String {
  * where stamp = `{seconds}{ms_part}000{random_0_999}`
  */
 fun generateXClientBuild(timestampMs: Long): String {
+    // Must match client.py exactly:
+    //   f"{ts // 1000}{ts % 1000:03d}000{rand}"   (ms zero-padded, rand not)
     val randPart = (Math.random() * 1000).toInt()
-    val stamp = "${timestampMs / 1000}${timestampMs % 1000 % 1000}000${String.format("%03d", randPart)}"
+    val msPart = (timestampMs % 1000).toString().padStart(3, '0')
+    val stamp = "${timestampMs / 1000}${msPart}000$randPart"
     val h = md5("$STOCK_CERT_SHA256$BUILD_TAG_SALT$stamp")
     return "$stamp.$h"
 }
@@ -151,6 +154,12 @@ fun generateXClientBuild(timestampMs: Long): String {
 /**
  * Sorts query parameters by key (then by value order of appearance) and
  * returns `key=value&key=value` — no leading `?`.
+ *
+ * Values are percent-decoded because client.py round-trips through
+ * `urllib.parse.parse_qsl`, which decodes them before signing. Encoding the
+ * signature input while the reference signs the decoded form silently
+ * produces a wrong x-tr-signature on any endpoint with an encoded query
+ * (notably resource-position/v2 with failUrl).
  */
 fun sortedQueryString(url: String): String {
     val parsed = java.net.URL(url)
@@ -159,7 +168,7 @@ fun sortedQueryString(url: String): String {
     val byKey = mutableMapOf<String, MutableList<String>>()
     for (i in pairs.indices step 2) {
         val k = pairs[i]
-        val v = if (i + 1 < pairs.size) pairs[i + 1] else ""
+        val v = if (i + 1 < pairs.size) decodeQueryValue(pairs[i + 1]) else ""
         byKey.getOrPut(k) { mutableListOf() }.add(v)
     }
     return byKey.entries
@@ -167,3 +176,10 @@ fun sortedQueryString(url: String): String {
         .flatMap { (k, vs) -> vs.map { v -> "$k=$v" } }
         .joinToString("&")
 }
+
+private fun decodeQueryValue(value: String): String =
+    try {
+        java.net.URLDecoder.decode(value, "UTF-8")
+    } catch (e: Exception) {
+        value
+    }
