@@ -1,0 +1,554 @@
+package com.tribalflix.app.api
+
+import com.tribalflix.app.crypto.*
+import com.squareup.okhttp3.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.util.*
+import java.util.concurrent.TimeUnit
+
+/**
+ * OkHttp-based MovieBox API client.
+ * Port of [client.py] — visitor login, header signing, 7-host failover.
+ *
+ * All network calls suspend on Dispatchers.IO.
+ * Uses org.json (built into Android) for JSON — no extra dependency needed.
+ */
+
+/** The 7-gateway host pool from the findings. */
+internal val DEFAULT_HOST_POOL: List<String> = listOf(
+    "https://api6.aoneroom.com",
+    "https://api5.aoneroom.com",
+    "https://api4.aoneroom.com",
+    "https://api4sg.aoneroom.com",
+    "https://api3.aoneroom.com",
+    "https://api6sg.aoneroom.com",
+    "https://api.inmoviebox.com",
+)
+
+internal val PATH_VISITOR_LOGIN = "/wefeed-mobile-bff/user-api/visitor-login"
+internal val PATH_SEARCH_V2 = "/wefeed-mobile-bff/subject-api/search/v2"
+internal val PATH_SUBJECT_GET = "/wefeed-mobile-bff/subject-api/get"
+internal val PATH_SEASON_INFO = "/wefeed-mobile-bff/subject-api/season-info"
+internal val PATH_PLAY_INFO_V2 = "/wefeed-mobile-bff/subject-api/play-info/v2"
+internal val PATH_RESOURCE = "/wefeed-mobile-bff/subject-api/resource"
+internal val PATH_RESOURCE_POSITION_V2 = "/wefeed-mobile-bff/subject-api/resource-position/v2"
+internal val PATH_EXT_CAPTIONS = "/wefeed-mobile-bff/subject-api/get-ext-captions"
+
+data class DeviceProfile(
+    val userAgent: String,
+    val clientInfo: Map<String, Any>
+)
+
+data class VisitorLoginResult(
+    val token: String,
+    val userId: String?,
+    val expiresAt: Long?
+)
+
+data class SearchSubject(
+    val subjectId: String,
+    val title: String?,
+    val poster: String?,
+    val subjectType: Int = 1,
+    val year: Int? = null,
+    val rating: Double? = null,
+    val synopsis: String? = null
+)
+
+data class PlayableSource(
+    val id: String,
+    val format: String,
+    val codec: String?,
+    val resolutions: List<String>,
+    val url: String,
+    val cookie: String?,
+    val referer: String,
+    val userAgent: String,
+    val resourceId: String? = null,
+    val sizeBytes: Long? = null,
+    val subtitleUrl: String? = null
+)
+
+data class CaptionTrack(
+    val language: String,
+    val url: String,
+    val size: Int
+)
+
+data class ResolvedSources(
+    val subjectId: String,
+    val season: Int,
+    val episode: Int,
+    val dashStreams: List<PlayableSource> = emptyList(),
+    val directStreams: List<PlayableSource> = emptyList(),
+    val subtitles: List<CaptionTrack> = emptyList()
+)
+
+class MovieBoxClient private constructor(
+    private val httpClient: OkHttpClient,
+    private val hostPool: List<String>,
+    private val deviceProfile: DeviceProfile,
+    private val spoofedIp: String
+) {
+
+    @Volatile private var token: String? = null
+    @Volatile private var userId: String? = null
+    @Volatile private var expiresAt: Long? = null
+    @Volatile private var activeHostIdx: Int = 0
+
+    constructor(hostPool: List<String> = DEFAULT_HOST_POOL) : this(
+        httpClient = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build(),
+        hostPool = hostPool,
+        deviceProfile = generateDeviceProfile(),
+        spoofedIp = randomSpoofedIp()
+    )
+
+    constructor(httpClient: OkHttpClient, hostPool: List<String> = DEFAULT_HOST_POOL) : this(
+        httpClient = httpClient,
+        hostPool = hostPool,
+        deviceProfile = generateDeviceProfile(),
+        spoofedIp = randomSpoofedIp()
+    )
+
+    suspend fun visitorLogin(): VisitorLoginResult = withContext(Dispatchers.IO) {
+        val body = JSONObject().toString()
+        val response = request("POST", PATH_VISITOR_LOGIN, body)
+        val token = response.optString("token") ?: error("Visitor login failed: no token in $response")
+        val uid = response.optString("uid") ?: response.optString("userId")
+        val exp = response.optLong("exp", -1).takeIf { it > 0 }
+
+        this.token = token
+        this.userId = uid
+        this.expiresAt = exp
+
+        VisitorLoginResult(token = token, userId = uid, expiresAt = exp)
+    }
+
+    suspend fun ensureSession(): String {
+        val now = System.currentTimeMillis() / 1000
+        if (token != null && (expiresAt == null || now + 60 < expiresAt)) {
+            return token!!
+        }
+        return visitorLogin().token
+    }
+
+    suspend fun search(query: String, page: Int = 1, perPage: Int = 15): List<SearchSubject> =
+        withContext(Dispatchers.IO) {
+            val payload = JSONObject()
+            payload.put("keyword", query)
+            payload.put("page", page)
+            payload.put("perPage", perPage)
+            payload.put("subjectType", 0)
+            val response = request("POST", PATH_SEARCH_V2, payload.toString())
+            parseSearchSubjects(response)
+        }
+
+    suspend fun getDetails(subjectId: String): JSONObject =
+        withContext(Dispatchers.IO) {
+            val path = "$PATH_SUBJECT_GET?subjectId=$subjectId"
+            request("GET", path)
+        }
+
+    suspend fun getSeasonInfo(subjectId: String): JSONObject =
+        withContext(Dispatchers.IO) {
+            val path = "$PATH_SEASON_INFO?subjectId=$subjectId"
+            request("GET", path)
+        }
+
+    suspend fun getPlayInfo(subjectId: String, season: Int = 0, episode: Int = 0): JSONObject =
+        withContext(Dispatchers.IO) {
+            val path = if (season == 0 && episode == 0) {
+                "$PATH_PLAY_INFO_V2?subjectId=$subjectId"
+            } else {
+                "$PATH_PLAY_INFO_V2?subjectId=$subjectId&se=$season&ep=$episode"
+            }
+            request("GET", path)
+        }
+
+    suspend fun getResources(
+        subjectId: String,
+        season: Int = 0,
+        episode: Int = 0,
+        page: Int = 1,
+        perPage: Int = 20,
+        resolution: Int? = null
+    ): JSONObject =
+        withContext(Dispatchers.IO) {
+            val resStr = if (resolution != null) "&resolution=$resolution" else ""
+            val path = if (season == 0 && episode == 0) {
+                "$PATH_RESOURCE?subjectId=$subjectId&page=$page&perPage=$perPage$resStr"
+            } else {
+                "$PATH_RESOURCE?subjectId=$subjectId&se=$season&ep=$episode&page=$page&perPage=$perPage$resStr"
+            }
+            request("GET", path)
+        }
+
+    suspend fun recoverResourcePosition(
+        subjectId: String,
+        resourceId: String,
+        failedUrl: String
+    ): JSONObject =
+        withContext(Dispatchers.IO) {
+            val enc = java.net.URLEncoder
+            val q = "subjectId=${enc.encode(subjectId, "UTF-8")}&" +
+                "resourceId=${enc.encode(resourceId, "UTF-8")}&" +
+                "failUrl=${enc.encode(failedUrl, "UTF-8")}&" +
+                "failCode=404&resourceNum=0&isVip=true"
+            val path = "$PATH_RESOURCE_POSITION_V2?$q"
+            request("GET", path)
+        }
+
+    suspend fun getExtCaptions(subjectId: String, resourceId: String): List<CaptionTrack> =
+        withContext(Dispatchers.IO) {
+            val path = "$PATH_EXT_CAPTIONS?subjectId=$subjectId&resourceId=$resourceId"
+            try {
+                val response = request("GET", path)
+                val extCaptions = response.optJSONArray("extCaptions")
+                if (extCaptions == null) return@withContext emptyList()
+                val valid = mutableListOf<CaptionTrack>()
+                for (i in 0 until extCaptions.length()) {
+                    val c = extCaptions.getJSONObject(i)
+                    val url = c.optString("url", "")
+                    if (url.isBlank() || url.contains("aa348f2541d13ffe")) continue
+                    val size = c.optInt("size", 0)
+                    if (size > 0 && size <= 50) continue
+                    valid.add(CaptionTrack(
+                        language = c.optString("lanName", c.optString("lan", "Unknown")),
+                        url = url,
+                        size = size
+                    ))
+                }
+                valid
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
+
+    suspend fun getAllPlayableSources(
+        subjectId: String,
+        season: Int = 0,
+        episode: Int = 0
+    ): ResolvedSources =
+        withContext(Dispatchers.IO) {
+            ensureSession()
+            val dashStreams = mutableListOf<PlayableSource>()
+
+            // 1. DASH manifests from play-info/v2
+            try {
+                val playInfo = getPlayInfo(subjectId, season, episode)
+                val streams = playInfo.optJSONArray("streams")
+                if (streams != null) {
+                    for (i in 0 until streams.length()) {
+                        val s = streams.getJSONObject(i)
+                        val rawUrl = s.optString("url", "")
+                        val signCookie = s.optString("signCookie", "")
+                        val resStr = s.optString("resolutions", "1080,720,480")
+
+                        var manifestUrl: String? = null
+
+                        if (signCookie.contains("urlprefix=")) {
+                            manifestUrl = extractEdgeCacheManifest(signCookie)
+                        }
+                        if (manifestUrl == null && signCookie.contains("CloudFront-Policy=")) {
+                            manifestUrl = extractCloudFrontManifest(signCookie)
+                        }
+                        if (manifestUrl == null && rawUrl.isNotBlank() && !isPlaceholderUrl(rawUrl)) {
+                            manifestUrl = rawUrl
+                        }
+
+                        manifestUrl?.let { url ->
+                            val resList = resStr.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                            dashStreams.add(PlayableSource(
+                                id = s.optString("id", ""),
+                                format = s.optString("format", "DASH"),
+                                codec = s.optString("codecName", s.optString("codec", null)),
+                                resolutions = resList,
+                                url = url,
+                                cookie = signCookie.takeIf { it.isNotBlank() },
+                                referer = STREAM_REFERER,
+                                userAgent = deviceProfile.userAgent
+                            ))
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // swallow; direct streams may still work
+            }
+
+            // 2. Direct MP4 resources
+            val directStreams = mutableListOf<PlayableSource>()
+            var subtitleTracks = mutableListOf<CaptionTrack>()
+
+            try {
+                val resData = getResources(subjectId, season, episode, page = 1, perPage = 20)
+                val items = resData.optJSONArray("list")
+                if (items != null) {
+                    for (i in 0 until items.length()) {
+                        val item = items.getJSONObject(i)
+                        val link = item.optString("resourceLink", item.optString("url", ""))
+                        val resId = item.optString("resourceId", item.optString("id", ""))
+                        val resNum = item.optInt("resolution", 1080)
+                        val se = item.optInt("se", 0)
+                        val ep = item.optInt("ep", 0)
+
+                        if ((season != 0 || episode != 0) && (se != season || ep != episode)) continue
+
+                        var resolvedLink = link
+                        if (isPlaceholderUrl(link) && resId.isNotBlank()) {
+                            try {
+                                val recovered = recoverResourcePosition(subjectId, resId, link)
+                                val rList = recovered.optJSONArray("list")
+                                if (rList != null) {
+                                    for (j in 0 until rList.length()) {
+                                        val cand = rList.getJSONObject(j)
+                                        val candId = cand.optString("resourceId", cand.optString("id", ""))
+                                        val candLink = cand.optString("resourceLink", cand.optString("url", ""))
+                                        if (candId == resId && candLink.isNotBlank() && !isPlaceholderUrl(candLink)) {
+                                            resolvedLink = candLink
+                                            break
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                // ignore
+                            }
+                        }
+
+                        if (resolvedLink.isNotBlank() && !isPlaceholderUrl(resolvedLink)) {
+                            directStreams.add(PlayableSource(
+                                id = resId,
+                                format = "direct",
+                                codec = item.optString("codecName", item.optString("codec", "h264")),
+                                resolutions = listOf("${resNum}p"),
+                                url = resolvedLink,
+                                cookie = null,
+                                referer = STREAM_REFERER,
+                                userAgent = deviceProfile.userAgent,
+                                resourceId = resId.takeIf { it.isNotBlank() },
+                                sizeBytes = item.optLong("size")
+                            ))
+                        }
+
+                        if (resId.isNotBlank() && subtitleTracks.isEmpty()) {
+                            val captions = getExtCaptions(subjectId, resId)
+                            if (captions.isNotEmpty()) subtitleTracks = captions
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // swallow
+            }
+
+            ResolvedSources(
+                subjectId = subjectId,
+                season = season,
+                episode = episode,
+                dashStreams = dashStreams,
+                directStreams = directStreams,
+                subtitles = subtitleTracks
+            )
+        }
+
+    private suspend fun request(method: String, pathAndQuery: String, body: String?): JSONObject {
+        ensureSession()
+
+        var lastError: Exception? = null
+        val attempts = hostPool.size
+        for (i in 0 until attempts) {
+            val idx = (activeHostIdx + i) % hostPool.size
+            val base = hostPool[idx]
+            val url = "$base$pathAndQuery"
+            val headers = buildHeaders(method, url, body)
+
+            try {
+                val requestBody = if (body == null) null else RequestBody.create(body, MediaType.get("application/json"))
+                val okRequest = Request.Builder()
+                    .url(url)
+                    .method(method, requestBody)
+                    .apply { headers.forEach { (k, v) -> addHeader(k, v) } }
+                    .build()
+
+                val response = httpClient.newCall(okRequest).execute()
+                val responseBody = response.body?.string() ?: ""
+
+                // Capture x-user header (may contain refreshed token)
+                val xUser = response.header("x-user")
+                if (xUser.isNotBlank()) {
+                    try {
+                        val userData = JSONObject(xUser)
+                        val newToken = userData.optString("token")
+                        if (newToken.isNotBlank()) {
+                            this.token = newToken
+                            this.userId = userData.optString("uid", userData.optString("userId"))
+                        }
+                    } catch (e: Exception) { /* ignore */ }
+                }
+
+                response.close()
+
+                if (response.code == 401 || response.code == 403) {
+                    token = null
+                    if (pathAndQuery != PATH_VISITOR_LOGIN) {
+                        try { visitorLogin(); continue } catch (e: Exception) { /* fall through */ }
+                    }
+                    lastError = RuntimeException("HTTP ${response.code} for $method $url")
+                    continue
+                }
+
+                if (!response.isSuccessful) {
+                    lastError = RuntimeException("HTTP ${response.code} for $method $url")
+                    continue
+                }
+
+                activeHostIdx = idx
+                val payload = JSONObject(responseBody)
+                return if (payload.has("data") && !payload.isNull("data")) {
+                    payload.getJSONObject("data")
+                } else {
+                    payload
+                }
+            } catch (e: Exception) {
+                lastError = e
+                continue
+            }
+        }
+        throw lastError ?: RuntimeException("All hosts exhausted for $method $pathAndQuery")
+    }
+
+    private fun buildHeaders(method: String, url: String, body: String?): Map<String, String> {
+        val tsMs = System.currentTimeMillis()
+        val buildTag = generateXClientBuild(tsMs)
+        val clientToken = generateXClientToken(tsMs)
+        val sig = generateXTrSignature(method, "application/json", "application/json", url, body, tsMs)
+
+        val infoDict = LinkedHashMap(deviceProfile.clientInfo)
+        infoDict["X-Client-Build"] = buildTag
+        val infoJson = JSONObject(infoDict).toString()
+
+        val headers = LinkedHashMap<String, String>()
+        headers["User-Agent"] = deviceProfile.userAgent
+        headers["Accept"] = "application/json"
+        headers["Content-Type"] = "application/json"
+        headers["Connection"] = "keep-alive"
+        headers["x-client-token"] = clientToken
+        headers["x-tr-signature"] = sig
+        headers["x-client-build"] = buildTag
+        headers["x-client-info"] = infoJson
+        headers["x-client-status"] = "0"
+        headers["x-forwarded-for"] = spoofedIp
+        if (token != null) headers["Authorization"] = "Bearer $token"
+        return headers
+    }
+
+    private fun generateDeviceProfile(): DeviceProfile {
+        val versionCode = listOf(50020117, 50020118, 50020119, 50020120, 50020121).random()
+        val androidVersions = listOf(
+            "9" to "PQ3A.190605.03081104",
+            "10" to "QP1A.191005.007.A3",
+            "11" to "RP1A.200720.011",
+            "12" to "S1B.220414.015",
+            "13" to "TQ2A.230405.003"
+        )
+        val redmiDevices = listOf(
+            "23078RKD5C" to "Redmi",
+            "2201117TY" to "Redmi",
+            "2201117TG" to "Redmi",
+            "22101316G" to "Redmi",
+            "21121210G" to "Redmi",
+            "M2012K11AG" to "Redmi"
+        )
+        val (androidVersion, buildId) = androidVersions.random()
+        val (model, brand) = redmiDevices.random()
+        val deviceId = (1..32).map { "0123456789abcdef".random() }.joinToString("")
+        val gaid = UUID.randomUUID().toString()
+
+        val ua = "com.community.oneroom/$versionCode (Linux; U; Android $androidVersion; en_US; $model; Build/$buildId; Cronet/135.0.7012.3)"
+
+        val info = mapOf(
+            "package_name" to "com.community.oneroom",
+            "version_name" to "4.0.01.0813.03",
+            "version_code" to versionCode,
+            "os" to "android",
+            "os_version" to androidVersion,
+            "install_ch" to "ps",
+            "device_id" to deviceId,
+            "install_store" to "ps",
+            "gaid" to gaid,
+            "brand" to brand,
+            "model" to model,
+            "system_language" to "en",
+            "net" to "NETWORK_WIFI",
+            "region" to "US",
+            "timezone" to "America/New_York",
+            "sp_code" to "40401",
+            "X-Play-Mode" to "2"
+        )
+        return DeviceProfile(ua, info)
+    }
+
+    private fun randomSpoofedIp(): String {
+        val prefixes = listOf(
+            "103.241", "49.36", "117.195", "106.198", "122.162",
+            "157.32", "182.70", "103.58", "27.60", "59.90"
+        )
+        val p = prefixes.random()
+        return "$p.${Random.nextInt(1, 255)}.${Random.nextInt(1, 255)}"
+    }
+
+    private fun parseSearchSubjects(response: JSONObject): List<SearchSubject> {
+        val results = response.optJSONArray("results")
+        if (results == null) return emptyList()
+        val first = results.optJSONObject(0)
+        val subjects = first?.optJSONArray("subjects") ?: return emptyList()
+        val out = mutableListOf<SearchSubject>()
+        for (i in 0 until subjects.length()) {
+            val s = subjects.getJSONObject(i)
+            out.add(SearchSubject(
+                subjectId = s.optString("subjectId", s.optString("id", "")),
+                title = s.optString("title", null),
+                poster = s.optString("poster", s.optString("posterUrl", null)),
+                subjectType = s.optInt("subjectType", 1),
+                year = s.optInt("year", -1).takeIf { it > 0 },
+                rating = s.optDouble("rating", -1.0).takeIf { it >= 0 },
+                synopsis = s.optString("synopsis", s.optString("description", null))
+            ))
+        }
+        return out
+    }
+}
+
+/** Extracts MPD URL from Edge-Cache signed cookie (urlprefix=...). */
+fun extractEdgeCacheManifest(signCookie: String): String? {
+    try {
+        val part = signCookie
+            .split("urlprefix=")[1]
+            .split(";")[0]
+            .split(":")[0]
+        val pad = (4 - part.length % 4) % 4
+        val norm = part.replace("-", "+").replace("_", "/") + "=".repeat(pad)
+        val decUrl = String(java.util.Base64.getDecoder().decode(norm)).removeSuffix("*/")
+        return if ("/dash/" in decUrl) "$decUrl/index.mpd" else null
+    } catch (e: Exception) { null }
+}
+
+/** Extracts MPD URL from CloudFront-Policy cookie. */
+fun extractCloudFrontManifest(signCookie: String): String? {
+    try {
+        val part = signCookie
+            .split("CloudFront-Policy=")[1]
+            .split(";")[0]
+            .trim()
+        val pad = (4 - part.length % 4) % 4
+        val norm = part.replace("-", "+").replace("_", "=").replace("~", "/") + "=".repeat(pad)
+        val policy = JSONObject(String(java.util.Base64.getDecoder().decode(norm)))
+        val resource = policy.optJSONArray("Statement")?.optJSONObject(0)?.optString("Resource", "") ?: ""
+        return if ("/dash/" in resource) resource.removeSuffix("*/") + "/index.mpd" else null
+    } catch (e: Exception) { null }
+}
