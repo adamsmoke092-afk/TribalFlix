@@ -86,11 +86,11 @@ class DownloadManager private constructor(
                     try {
                         val input: InputStream? = response.body()?.byteStream()
                         if (input != null) {
-                            input.use { in ->
+                            input.use { stream ->
                                 var downloaded = startByte
                                 val buffer = ByteArray(8192)
                                 while (true) {
-                                    val read = in.read(buffer)
+                                    val read = stream.read(buffer)
                                     if (read == -1) break
                                     output.write(buffer, 0, read)
                                     downloaded += read
