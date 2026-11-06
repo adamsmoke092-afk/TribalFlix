@@ -3,7 +3,9 @@ package com.tribalflix.app.download
 import android.content.Context
 import android.os.Environment
 import com.tribalflix.app.api.PlayableSource
-import com.squareup.okhttp3.*
+import com.squareup.okhttp3.OkHttpClient
+import com.squareup.okhttp3.Request
+import com.squareup.okhttp3.Headers
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 import java.io.File

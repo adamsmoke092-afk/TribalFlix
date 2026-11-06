@@ -8,14 +8,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.viewmodelScope
 import com.tribalflix.app.playback.MovieBoxPlayer
 import com.tribalflix.app.repository.MovieBoxRepository
 import com.tribalflix.app.api.MovieBoxClient
 import com.tribalflix.app.ui.Screens.NavigationHost
 import com.tribalflix.app.ui.theme.TribalFlixTheme
 import com.tribalflix.app.viewmodel.MovieBoxViewModel
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 

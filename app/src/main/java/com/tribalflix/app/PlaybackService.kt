@@ -9,12 +9,4 @@ import androidx.media3.session.MediaSessionService
  * Declared in AndroidManifest.xml for foreground service support.
  */
 class PlaybackService : MediaSessionService() {
-
-    override fun onBind(intent: Intent): IBinder? {
-        return super.onBind(intent)
-    }
-
-    override fun onGetSession(controller: androidx.media3.session.MediaSessionController): androidx.media3.session.MediaSession? {
-        return super.onGetSession(controller)
-    }
 }

@@ -135,7 +135,7 @@ class MovieBoxClient private constructor(
 
     suspend fun ensureSession(): String {
         val now = System.currentTimeMillis() / 1000
-        if (token != null && (expiresAt == 0 || now + 60 < expiresAt)) {
+        if (token != null && (expiresAt == 0L || now + 60 < expiresAt)) {
             return token!!
         }
         return visitorLogin().token
@@ -155,13 +155,13 @@ class MovieBoxClient private constructor(
     suspend fun getDetails(subjectId: String): JSONObject =
         withContext(Dispatchers.IO) {
             val path = "$PATH_SUBJECT_GET?subjectId=$subjectId"
-            request("GET", path)
+            request("GET", path, null)
         }
 
     suspend fun getSeasonInfo(subjectId: String): JSONObject =
         withContext(Dispatchers.IO) {
             val path = "$PATH_SEASON_INFO?subjectId=$subjectId"
-            request("GET", path)
+            request("GET", path, null)
         }
 
     suspend fun getPlayInfo(subjectId: String, season: Int = 0, episode: Int = 0): JSONObject =
@@ -171,7 +171,7 @@ class MovieBoxClient private constructor(
             } else {
                 "$PATH_PLAY_INFO_V2?subjectId=$subjectId&se=$season&ep=$episode"
             }
-            request("GET", path)
+            request("GET", path, null)
         }
 
     suspend fun getResources(
@@ -189,7 +189,7 @@ class MovieBoxClient private constructor(
             } else {
                 "$PATH_RESOURCE?subjectId=$subjectId&se=$season&ep=$episode&page=$page&perPage=$perPage$resStr"
             }
-            request("GET", path)
+            request("GET", path, null)
         }
 
     suspend fun recoverResourcePosition(
@@ -198,20 +198,19 @@ class MovieBoxClient private constructor(
         failedUrl: String
     ): JSONObject =
         withContext(Dispatchers.IO) {
-            val enc = URLEncoder
-            val q = "subjectId=${enc.encode(subjectId, "UTF-8")}&" +
-                "resourceId=${enc.encode(resourceId, "UTF-8")}&" +
-                "failUrl=${enc.encode(failedUrl, "UTF-8")}&" +
+            val q = "subjectId=${URLEncoder.encode(subjectId, "UTF-8")}&" +
+                "resourceId=${URLEncoder.encode(resourceId, "UTF-8")}&" +
+                "failUrl=${URLEncoder.encode(failedUrl, "UTF-8")}&" +
                 "failCode=404&resourceNum=0&isVip=true"
             val path = "$PATH_RESOURCE_POSITION_V2?$q"
-            request("GET", path)
+            request("GET", path, null)
         }
 
     suspend fun getExtCaptions(subjectId: String, resourceId: String): List<CaptionTrack> =
         withContext(Dispatchers.IO) {
             val path = "$PATH_EXT_CAPTIONS?subjectId=$subjectId&resourceId=$resourceId"
             try {
-                val response = request("GET", path)
+                val response = request("GET", path, null)
                 val extCaptions = response.optJSONArray("extCaptions")
                 if (extCaptions == null) return@withContext emptyList()
                 val valid = mutableListOf<CaptionTrack>()
@@ -370,18 +369,16 @@ class MovieBoxClient private constructor(
             val headers = buildHeaders(method, url, body)
 
             try {
-                val mediaType = "application/json".toMediaType()
-                val requestBody = if (body == null) null else body.toRequestBody(mediaType)
-                val okRequest = when {
+                val mediaType = MediaType.Companion.parse("application/json")!!
+                val requestBody = if (body == null) null else RequestBody.create(body, mediaType)
+                val finalRequest = when {
                     method.equals("GET", ignoreCase = true) ->
-                        Request.Builder().url(url).get().build()
+                        Request.Builder().url(url).headers(Headers.of(headers)).get().build()
                     else ->
-                        Request.Builder().url(url).post(requestBody).build()
-                }.apply {
-                    headers.forEach { (k, v) -> addHeader(k, v) }
+                        Request.Builder().url(url).headers(Headers.of(headers)).post(requestBody).build()
                 }
 
-                val response = httpClient.newCall(okRequest).execute()
+                val response = httpClient.newCall(finalRequest).execute()
                 val responseBody = response.body?.string() ?: ""
 
                 // Capture x-user header (may contain refreshed token)

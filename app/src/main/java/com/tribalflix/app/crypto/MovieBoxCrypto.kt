@@ -90,7 +90,7 @@ fun buildCanonicalString(
 
     val (bodyLen, bodyHash) = if (body != null) {
         val bodyBytes = body.toByteArray()
-        val truncated = bodyBytes.take(102_400)
+        val truncated = bodyBytes.take(102_400).toByteArray()
         bodyBytes.size.toString() to md5(truncated)
     } else {
         "" to ""

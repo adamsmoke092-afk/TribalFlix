@@ -9,7 +9,7 @@ import androidx.media3.common.DefaultMediaSourceFactory
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.trackselection.DefaultTrackSelector
-import com.tribalflix.app.models.PlayableSource
+import com.tribalflix.app.api.PlayableSource
 
 /**
  * Media3 ExoPlayer wrapper for TribalFlix playback.

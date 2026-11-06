@@ -8,21 +8,26 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedShape
 import androidx.compose.material3.*
 import androidx.compose.material.icons.filled.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.AndroidView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
-import com.tribalflix.app.api.SearchSubject
 import com.tribalflix.app.api.CaptionTrack
+import com.tribalflix.app.api.MovieBoxClient
 import com.tribalflix.app.api.PlayableSource
+import com.tribalflix.app.api.SearchSubject
 import com.tribalflix.app.player.MovieBoxResolver
+import com.tribalflix.app.player.ResolvedMovie
 import com.tribalflix.app.repository.MovieBoxRepository
+import com.tribalflix.app.playback.MovieBoxPlayer
 import com.tribalflix.app.ui.theme.TribalFlixTheme
 import com.tribalflix.app.viewmodel.MovieBoxViewModel
 import com.tribalflix.app.viewmodel.UiState
@@ -37,7 +42,7 @@ import androidx.media3.ui.PlayerView
 @Composable
 fun NavigationHost(
     viewModel: MovieBoxViewModel,
-    player: com.tribalflix.app.playback.MovieBoxPlayer
+    player: MovieBoxPlayer
 ) {
     var showPlayer by remember { mutableStateOf(false) }
     var currentSource by remember { mutableStateOf<PlayableSource?>(null) }
@@ -72,18 +77,18 @@ fun NavigationHost(
                     onBack = { showPlayer = false }
                 )
             } else {
-                when (state) {
+                when (val s = state) {
                     is UiState.Loading -> {
                         CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                     }
                     is UiState.Error -> {
-                        ErrorScreen(message = state.message, onRetry = { /* no-op */ })
+                        ErrorScreen(message = s.message, onRetry = { /* no-op */ })
                     }
                     is UiState.SearchResults -> {
                         SearchScreen(
                             viewModel = viewModel,
-                            query = state.query,
-                            results = state.results,
+                            query = s.query,
+                            results = s.results,
                             onMovieSelected = { subjectId ->
                                 viewModel.resolveMovie(subjectId)
                             },
@@ -97,7 +102,7 @@ fun NavigationHost(
                     is UiState.MovieResolved -> {
                         DetailsScreen(
                             viewModel = viewModel,
-                            movie = state.movie,
+                            movie = s.movie,
                             resolver = MovieBoxResolver(client = MovieBoxClient()),
                             onPlay = { source, headers ->
                                 currentSource = source
@@ -203,7 +208,7 @@ private fun SearchScreen(
 @Composable
 private fun DetailsScreen(
     viewModel: MovieBoxViewModel,
-    movie: com.tribalflix.app.player.ResolvedMovie,
+    movie: ResolvedMovie,
     resolver: MovieBoxResolver,
     onPlay: (PlayableSource, Map<String, String>) -> Unit
 ) {
@@ -302,7 +307,7 @@ private fun DetailsScreen(
 /** Fullscreen player screen. */
 @Composable
 private fun PlayerScreen(
-    player: com.tribalflix.app.playback.MovieBoxPlayer,
+    player: MovieBoxPlayer,
     source: PlayableSource,
     headers: Map<String, String>,
     onBack: () -> Unit
@@ -316,7 +321,7 @@ private fun PlayerScreen(
 
         AndroidView(
             factory = { context -> PlayerView(context) },
-            update = { it.player = exoPlayerRef },
+            update = { view -> view.player = exoPlayerRef },
             modifier = Modifier.fillMaxSize()
         )
 
