@@ -7,6 +7,8 @@ import com.squareup.okhttp3.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -80,17 +82,26 @@ class DownloadManager private constructor(
                     val actualTotal = if (startByte > 0) contentLength + startByte else contentLength
 
                     val tempFile = File(destFile.absolutePath + ".part")
-                    val output = tempFile.outputStream().buffered()
+                    val output = FileOutputStream(tempFile).buffered()
                     try {
-                        val stream = response.body()?.source()
-                        if (stream != null) {
-                            stream.use { source ->
+                        val input: InputStream? = response.body()?.byteStream()
+                        if (input != null) {
+                            input.use { in ->
                                 var downloaded = startByte
+                                val buffer = ByteArray(8192)
                                 while (true) {
-                                    val read = source.read(new okio.Buffer(), 8192)
+                                    val read = in.read(buffer)
                                     if (read == -1) break
-                                    // Data is read into the temp buffer; we just need to drain it
+                                    output.write(buffer, 0, read)
                                     downloaded += read
+
+                                    // Update progress every 8KB
+                                    if (downloaded - (existing?.downloadedBytes ?: 0) >= 8192) {
+                                        db.downloadDao().updateProgress(
+                                            source.id, downloaded,
+                                            "in_progress", System.currentTimeMillis()
+                                        )
+                                    }
                                 }
                             }
                         }
