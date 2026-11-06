@@ -421,11 +421,93 @@ class MovieBoxClient(
                 continue
             }
         }
+        // Diagnostic only: replay the same signed request over two other
+        // Android transports so the failure message can distinguish
+        // "server rejects this device's TLS" from "OkHttp-specific".
+        val probeUrl = "${hostPool[activeHostIdx]}$pathAndQuery"
+        val probeHeaders = buildHeaders(method, probeUrl, body)
+        val probe = runCatching {
+            probeRawTls(probeUrl, method, probeHeaders, body) + "; " +
+                probeHttpUrlConnection(probeUrl, method, probeHeaders, body)
+        }.getOrElse { "probe-error=${it.javaClass.simpleName}: ${it.message}" }
+
         throw RuntimeException(
             "All $attempts hosts failed for $method $pathAndQuery -> " +
-                failures.joinToString(" | "),
+                failures.joinToString(" | ") + " | transport probe: $probe",
             lastError
         )
+    }
+
+    /** Sends the identical request over a bare SSLSocket (platform TLS, no OkHttp). */
+    private fun probeRawTls(
+        url: String,
+        method: String,
+        headers: Map<String, String>,
+        body: String?
+    ): String {
+        return try {
+            val uri = java.net.URI(url)
+            val host = uri.host ?: return "raw=no-host"
+            val port = if (uri.port > 0) uri.port else 443
+            val path = (uri.rawPath ?: "/") + (uri.rawQuery?.let { "?$it" } ?: "")
+            val payload = body?.toByteArray()
+
+            val ssl = javax.net.ssl.SSLSocketFactory.getDefault()
+                .createSocket(host, port) as javax.net.ssl.SSLSocket
+            ssl.soTimeout = 8000
+            ssl.startHandshake()
+
+            val head = buildString {
+                append("$method $path HTTP/1.1\r\n")
+                append("Host: $host\r\n")
+                for ((k, v) in headers) {
+                    if (k.equals("Host", true) || k.equals("Content-Length", true)) continue
+                    append("$k: $v\r\n")
+                }
+                append("Content-Length: ${payload?.size ?: 0}\r\n")
+                append("Connection: close\r\n")
+                append("\r\n")
+            }
+            ssl.outputStream.apply {
+                write(head.toByteArray())
+                if (payload != null) write(payload)
+                flush()
+            }
+            val status = ssl.inputStream.bufferedReader().readLine() ?: "raw=empty"
+            ssl.close()
+            "raw=$status"
+        } catch (e: Exception) {
+            "raw=${e.javaClass.simpleName}: ${e.message}"
+        }
+    }
+
+    /** Sends the identical request over HttpURLConnection (Android's OkHttp 2.x stack). */
+    private fun probeHttpUrlConnection(
+        url: String,
+        method: String,
+        headers: Map<String, String>,
+        body: String?
+    ): String {
+        return try {
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = method
+            conn.connectTimeout = 8000
+            conn.readTimeout = 15000
+            conn.instanceFollowRedirects = false
+            for ((k, v) in headers) {
+                if (k.equals("Host", true) || k.equals("Content-Length", true)) continue
+                try { conn.setRequestProperty(k, v) } catch (e: Exception) { /* ignore */ }
+            }
+            if (body != null) {
+                conn.doOutput = true
+                conn.outputStream.use { it.write(body.toByteArray()) }
+            }
+            val code = conn.responseCode
+            conn.disconnect()
+            "conn=$code"
+        } catch (e: Exception) {
+            "conn=${e.javaClass.simpleName}: ${e.message}"
+        }
     }
 
     private fun buildHeaders(method: String, url: String, body: String?): Map<String, String> {
