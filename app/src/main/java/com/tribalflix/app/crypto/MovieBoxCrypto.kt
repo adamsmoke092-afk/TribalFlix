@@ -15,10 +15,10 @@ import javax.crypto.spec.SecretKeySpec
 
 /** 30-byte HMAC secret used to sign x-tr-signature headers. */
 internal val DEFAULT_SECRET_BYTES: ByteArray = byteArrayOf(
-    0xef, 0xa8, 0x91, 0x97, 0x4e, 0xec, 0xd3, 0x14,
-    0x8d, 0xf6, 0x3a, 0xa6, 0x11, 0x60, 0x2d, 0xef,
-    0xd1, 0x01, 0x25, 0x9b, 0xa5, 0x21, 0x02, 0x2c,
-    0x57, 0xae, 0x05, 0x66, 0xbd, 0x8e
+    0xef.toByte(), 0xa8.toByte(), 0x91.toByte(), 0x97.toByte(), 0x4e.toByte(), 0xec.toByte(), 0xd3.toByte(), 0x14.toByte(),
+    0x8d.toByte(), 0xf6.toByte(), 0x3a.toByte(), 0xa6.toByte(), 0x11.toByte(), 0x60.toByte(), 0x2d.toByte(), 0xef.toByte(),
+    0xd1.toByte(), 0x01.toByte(), 0x25.toByte(), 0x9b.toByte(), 0xa5.toByte(), 0x21.toByte(), 0x02.toByte(), 0x2c.toByte(),
+    0x57.toByte(), 0xae.toByte(), 0x05.toByte(), 0x66.toByte(), 0xbd.toByte(), 0x8e.toByte()
 )
 
 /** Stock certificate SHA-256 used in x-client-build generation. */
@@ -44,9 +44,10 @@ fun isPlaceholderUrl(url: String?): Boolean {
     return "macdn.aoneroom.com" in lower && "/other/" in lower
 }
 
-/** MD5 hex digest of [input]. */
+/** MD5 hex digest of [input] string. */
 fun md5(input: String): String = md5(input.toByteArray())
 
+/** MD5 hex digest of [input] bytes. */
 fun md5(input: ByteArray): String {
     val digest = MessageDigest.getInstance("MD5").digest(input)
     return digest.joinToString("") { "%02x".format(it) }

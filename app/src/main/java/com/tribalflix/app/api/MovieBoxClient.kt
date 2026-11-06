@@ -1,10 +1,12 @@
 package com.tribalflix.app.api
 
 import com.tribalflix.app.crypto.*
-import com.squareup.okhttp3.*
+import okhttp3.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.net.URLEncoder
+import kotlin.random.Random
 import java.util.*
 import java.util.concurrent.TimeUnit
 
@@ -93,10 +95,10 @@ class MovieBoxClient private constructor(
     private val spoofedIp: String
 ) {
 
-    @Volatile private var token: String? = null
-    @Volatile private var userId: String? = null
-    @Volatile private var expiresAt: Long? = null
-    @Volatile private var activeHostIdx: Int = 0
+    private var token: String? = null
+    private var userId: String? = null
+    private var expiresAt: Long = 0
+    private var activeHostIdx: Int = 0
 
     constructor(hostPool: List<String> = DEFAULT_HOST_POOL) : this(
         httpClient = OkHttpClient.Builder()
@@ -126,14 +128,14 @@ class MovieBoxClient private constructor(
 
         this.token = token
         this.userId = uid
-        this.expiresAt = exp
+        this.expiresAt = exp ?: 0
 
         VisitorLoginResult(token = token, userId = uid, expiresAt = exp)
     }
 
     suspend fun ensureSession(): String {
         val now = System.currentTimeMillis() / 1000
-        if (token != null && (expiresAt == null || now + 60 < expiresAt)) {
+        if (token != null && (expiresAt == 0 || now + 60 < expiresAt)) {
             return token!!
         }
         return visitorLogin().token
@@ -196,7 +198,7 @@ class MovieBoxClient private constructor(
         failedUrl: String
     ): JSONObject =
         withContext(Dispatchers.IO) {
-            val enc = java.net.URLEncoder
+            val enc = URLEncoder
             val q = "subjectId=${enc.encode(subjectId, "UTF-8")}&" +
                 "resourceId=${enc.encode(resourceId, "UTF-8")}&" +
                 "failUrl=${enc.encode(failedUrl, "UTF-8")}&" +
@@ -225,7 +227,7 @@ class MovieBoxClient private constructor(
                         size = size
                     ))
                 }
-                valid
+                valid.toList()
             } catch (e: Exception) {
                 emptyList()
             }
@@ -284,7 +286,7 @@ class MovieBoxClient private constructor(
 
             // 2. Direct MP4 resources
             val directStreams = mutableListOf<PlayableSource>()
-            var subtitleTracks = mutableListOf<CaptionTrack>()
+            var subtitleTracks = emptyList<CaptionTrack>()
 
             try {
                 val resData = getResources(subjectId, season, episode, page = 1, perPage = 20)
@@ -368,12 +370,16 @@ class MovieBoxClient private constructor(
             val headers = buildHeaders(method, url, body)
 
             try {
-                val requestBody = if (body == null) null else RequestBody.create(body, MediaType.get("application/json"))
-                val okRequest = Request.Builder()
-                    .url(url)
-                    .method(method, requestBody)
-                    .apply { headers.forEach { (k, v) -> addHeader(k, v) } }
-                    .build()
+                val mediaType = "application/json".toMediaType()
+                val requestBody = if (body == null) null else body.toRequestBody(mediaType)
+                val okRequest = when {
+                    method.equals("GET", ignoreCase = true) ->
+                        Request.Builder().url(url).get().build()
+                    else ->
+                        Request.Builder().url(url).post(requestBody).build()
+                }.apply {
+                    headers.forEach { (k, v) -> addHeader(k, v) }
+                }
 
                 val response = httpClient.newCall(okRequest).execute()
                 val responseBody = response.body?.string() ?: ""

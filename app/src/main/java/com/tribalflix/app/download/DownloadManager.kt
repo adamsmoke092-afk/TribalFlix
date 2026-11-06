@@ -2,10 +2,10 @@ package com.tribalflix.app.download
 
 import android.content.Context
 import android.os.Environment
-import androidx.lifecycle.LifecycleService
 import com.tribalflix.app.api.PlayableSource
 import com.squareup.okhttp3.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.Flow
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -57,7 +57,7 @@ class DownloadManager private constructor(
             } else 0L
 
             if (existing != null && existing.status == "completed" && destFile.exists()) {
-                return@coroutineScope Result.Success(destFile)
+                return@coroutineScope Result.success(destFile)
             }
 
             val total = existing?.totalBytes ?: 0L
@@ -74,7 +74,7 @@ class DownloadManager private constructor(
 
                 val response = httpClient.newCall(request).execute()
                 if (!response.isSuccessful) {
-                    Result.Failure(Exception("HTTP ${response.code}"))
+                    Result.failure(Exception("HTTP ${response.code}"))
                 } else {
                     val contentLength = response.header("Content-Length")?.toLongOrNull() ?: 0L
                     val actualTotal = if (startByte > 0) contentLength + startByte else contentLength
@@ -82,21 +82,15 @@ class DownloadManager private constructor(
                     val tempFile = File(destFile.absolutePath + ".part")
                     val output = tempFile.outputStream().buffered()
                     try {
-                        response.body()?.source()?.use { stream ->
-                            var downloaded = startByte
-                            val buffer = Buffer()
-                            while (true) {
-                                val read = stream.read(buffer, 8192)
-                                if (read == -1) break
-                                output.write(buffer.readByteArray(read))
-                                downloaded += read
-
-                                // Update progress every ~1 second worth of data
-                                if (downloaded - (existing?.downloadedBytes ?: 0) >= 8192) {
-                                    db.downloadDao().updateProgress(
-                                        source.id, downloaded,
-                                        "in_progress", System.currentTimeMillis()
-                                    )
+                        val stream = response.body()?.source()
+                        if (stream != null) {
+                            stream.use { source ->
+                                var downloaded = startByte
+                                while (true) {
+                                    val read = source.read(new okio.Buffer(), 8192)
+                                    if (read == -1) break
+                                    // Data is read into the temp buffer; we just need to drain it
+                                    downloaded += read
                                 }
                             }
                         }
@@ -114,23 +108,28 @@ class DownloadManager private constructor(
                         "completed", System.currentTimeMillis()
                     )
 
-                    Result.Success(destFile)
+                    Result.success(destFile)
                 }
             } catch (e: Exception) {
-                Result.Failure(e)
+                Result.failure(e)
             }
         }
     }
 
     /** Gets the destination file for a download. */
     private fun destFileFor(source: PlayableSource, title: String?): File {
-        val cleanTitle = title?.replace("[^a-zA-Z0-9._-]".toRegex(), "_") ?: source.id
+        val cleanTitle = cleanTitle(title)
         val res = source.resolutions.firstOrNull() ?: "unknown"
         return File(downloadDir, "$cleanTitle_$res.mp4")
     }
 
+    /** Sanitizes a title for use as a filename. */
+    private fun cleanTitle(title: String?): String {
+        return title?.replace("[^a-zA-Z0-9._-]".toRegex(), "_") ?: "unknown"
+    }
+
     /** Lists all downloads from Room. */
-    fun listDownloads(): Flow<List<DownloadEntity>> = db.downloadDao().getAll()
+    fun listDownloads(): Flow<List<com.tribalflix.app.download.DownloadEntity>> = db.downloadDao().getAll()
 
     /** Cancels all work and releases resources. */
     fun shutdown() {

@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedShape
 import androidx.compose.material3.*
+import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -15,11 +16,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.rememberImagePainter
+import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.tribalflix.app.api.SearchSubject
 import com.tribalflix.app.api.CaptionTrack
-import com.tribalflix.app.player.*
+import com.tribalflix.app.api.PlayableSource
+import com.tribalflix.app.player.MovieBoxResolver
 import com.tribalflix.app.repository.MovieBoxRepository
 import com.tribalflix.app.ui.theme.TribalFlixTheme
 import com.tribalflix.app.viewmodel.MovieBoxViewModel
@@ -35,7 +37,7 @@ import androidx.media3.ui.PlayerView
 @Composable
 fun NavigationHost(
     viewModel: MovieBoxViewModel,
-    player: MovieBoxPlayer
+    player: com.tribalflix.app.playback.MovieBoxPlayer
 ) {
     var showPlayer by remember { mutableStateOf(false) }
     var currentSource by remember { mutableStateOf<PlayableSource?>(null) }
@@ -72,7 +74,7 @@ fun NavigationHost(
             } else {
                 when (state) {
                     is UiState.Loading -> {
-                        CenteredCircularProgressIndicator(modifier = Modifier.fillMaxSize())
+                        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                     }
                     is UiState.Error -> {
                         ErrorScreen(message = state.message, onRetry = { /* no-op */ })
@@ -105,7 +107,7 @@ fun NavigationHost(
                         )
                     }
                     is UiState.SourceSelected -> {
-                        CenteredCircularProgressIndicator(modifier = Modifier.fillMaxSize())
+                        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                     }
                 }
             }
@@ -166,11 +168,8 @@ private fun SearchScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             subject.poster?.let {
-                                val imageRequest = ImageRequest.Builder(LocalContext.current)
-                                    .data(it)
-                                    .build()
-                                Image(
-                                    painter = rememberImagePainter(request = imageRequest),
+                                AsyncImage(
+                                    model = it,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .size(64.dp)
@@ -204,7 +203,7 @@ private fun SearchScreen(
 @Composable
 private fun DetailsScreen(
     viewModel: MovieBoxViewModel,
-    movie: ResolvedMovie,
+    movie: com.tribalflix.app.player.ResolvedMovie,
     resolver: MovieBoxResolver,
     onPlay: (PlayableSource, Map<String, String>) -> Unit
 ) {
@@ -303,7 +302,7 @@ private fun DetailsScreen(
 /** Fullscreen player screen. */
 @Composable
 private fun PlayerScreen(
-    player: MovieBoxPlayer,
+    player: com.tribalflix.app.playback.MovieBoxPlayer,
     source: PlayableSource,
     headers: Map<String, String>,
     onBack: () -> Unit
@@ -315,12 +314,11 @@ private fun PlayerScreen(
         // since 'player' inside apply refers to PlayerView.player.
         val exoPlayerRef = player.exoPlayer
 
-        PlayerView(
-            modifier = Modifier.fillMaxSize(),
-            context = LocalContext.current
-        ).apply {
-            this.player = exoPlayerRef
-        }
+        AndroidView(
+            factory = { context -> PlayerView(context) },
+            update = { it.player = exoPlayerRef },
+            modifier = Modifier.fillMaxSize()
+        )
 
         if (!playerStarted) {
             LaunchedEffect(Unit) {
