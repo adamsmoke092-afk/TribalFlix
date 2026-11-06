@@ -5,39 +5,33 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.common.DefaultMediaSourceFactory
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.ui.PlayerView
 import com.tribalflix.app.api.PlayableSource
 
 /**
  * Media3 ExoPlayer wrapper for TribalFlix playback.
  * Applies per-stream headers (User-Agent, Referer, Cookie) to every request.
  */
-class MovieBoxPlayer private constructor(
-    private val context: Context,
-    private val player: ExoPlayer,
-    private val trackSelector: DefaultTrackSelector
-) {
+class MovieBoxPlayer private constructor(private val context: Context) {
+
+    private val trackSelector = DefaultTrackSelector(context)
+
+    private val player: ExoPlayer = ExoPlayer.Builder(context)
+        .setTrackSelector(trackSelector)
+        .setAudioAttributes(
+            AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).build(),
+            /* handleAudioFocus = */ true
+        )
+        .build()
 
     private var currentSource: PlayableSource? = null
 
-    /** Creates a player with default ExoPlayer configuration. */
-    constructor(context: Context) : this(
-        context = context,
-        player = ExoPlayer.Builder(context)
-            .setAudioAttributes(
-                AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).build()
-            )
-            .build(),
-        trackSelector = DefaultTrackSelector(context)
-    ) {
-        player.trackSelector = trackSelector
-    }
-
     /** Binds a PlayerView for UI and controls. */
-    fun bindView(playerView: androidx.media3.ui.PlayerView) {
+    fun bindView(playerView: PlayerView) {
         playerView.player = player
     }
 
@@ -52,8 +46,7 @@ class MovieBoxPlayer private constructor(
         get() = player
 
     /** The currently loaded source, or null if nothing is loaded. */
-    val currentSource: PlayableSource?
-        get() = this.currentSource
+    fun currentSource(): PlayableSource? = currentSource
 
     /** Whether the player is currently playing. */
     val isPlaying: Boolean
@@ -115,12 +108,13 @@ class MovieBoxPlayer private constructor(
     /** Stops playback and clears the media source. */
     fun stop() {
         player.stop()
+        player.clearMediaItems()
         currentSource = null
     }
 
     /** Sets volume (0.0 to 1.0). */
     fun setVolume(volume: Float) {
-        player.setVolume(volume)
+        player.volume = volume
     }
 
     companion object {

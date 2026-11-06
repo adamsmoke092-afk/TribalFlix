@@ -3,23 +3,25 @@ package com.tribalflix.app.download
 import android.content.Context
 import android.os.Environment
 import com.tribalflix.app.api.PlayableSource
-import com.squareup.okhttp3.OkHttpClient
-import com.squareup.okhttp3.Request
-import com.squareup.okhttp3.Headers
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import okhttp3.Headers
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Manages resumable direct MP4 downloads.
  * Uses OkHttp with Range requests for pause/resume support.
  * Persists progress to Room so downloads survive process death
- * (but not uninstall-reinstall, per user habit).
+ * (but not uninstall-reinstall, per the user's install habit).
  */
-
 class DownloadManager private constructor(
     private val context: Context,
     private val httpClient: OkHttpClient,
@@ -27,7 +29,7 @@ class DownloadManager private constructor(
 ) : CoroutineScope {
 
     private val job = Job()
-    override val coroutineContext: CoroutineContext = job + Dispatchers.Default
+    override val coroutineContext: CoroutineContext = job + Dispatchers.IO
 
     private val downloadDir: File =
         File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "TribalFlix")
@@ -37,7 +39,7 @@ class DownloadManager private constructor(
     }
 
     constructor(context: Context) : this(
-        context = context,
+        context = context.applicationContext,
         httpClient = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
@@ -47,106 +49,133 @@ class DownloadManager private constructor(
         db = AppDatabase.getInstance(context.applicationContext)
     )
 
-    /** Starts or resumes a download. Returns the destination file. */
+    /**
+     * Starts or resumes a download. Returns the destination file.
+     *
+     * @param subjectId Room key; defaults to the source id.
+     */
     suspend fun startDownload(
         source: PlayableSource,
         title: String?,
-        headers: Map<String, String>
-    ): Result<File> {
-        return coroutineScope {
-            val existing = db.downloadDao().getBySubjectId(source.id)
-            val destFile = destFileFor(source, title)
-            val startByte = if (existing != null && existing.status != "completed") {
-                existing.downloadedBytes
-            } else 0L
+        headers: Map<String, String>,
+        subjectId: String = source.id
+    ): Result<File> = coroutineScope {
+        val destFile = destFileFor(source, title)
+        val existing = db.downloadDao().getBySubjectId(subjectId)
 
-            if (existing != null && existing.status == "completed" && destFile.exists()) {
-                return@coroutineScope Result.success(destFile)
-            }
+        if (existing?.status == STATUS_COMPLETED && destFile.exists()) {
+            return@coroutineScope Result.success(destFile)
+        }
 
-            val total = existing?.totalBytes ?: 0L
-            val requestHeaders = headers.toMutableMap()
-            if (startByte > 0) {
-                requestHeaders["Range"] = "bytes=$startByte-"
-            }
+        val startByte = if (existing != null) existing.downloadedBytes else 0L
+        val headerBuilder = Headers.Builder()
+        headers.forEach { (name, value) -> headerBuilder.add(name, value) }
+        if (startByte > 0) headerBuilder.add("Range", "bytes=$startByte-")
+        val okHeaders = headerBuilder.build()
 
-            try {
-                val request = Request.Builder()
-                    .url(source.url)
-                    .headers(Headers.of(requestHeaders))
-                    .build()
+        db.downloadDao().insert(
+            DownloadEntity(
+                subjectId = subjectId,
+                title = title,
+                url = source.url,
+                resolution = source.resolutions.firstOrNull(),
+                totalBytes = existing?.totalBytes ?: 0L,
+                downloadedBytes = startByte,
+                status = STATUS_IN_PROGRESS,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
 
-                val response = httpClient.newCall(request).execute()
+        try {
+            val request = Request.Builder()
+                .url(source.url)
+                .headers(okHeaders)
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    Result.failure(Exception("HTTP ${response.code}"))
-                } else {
-                    val contentLength = response.header("Content-Length")?.toLongOrNull() ?: 0L
-                    val actualTotal = if (startByte > 0) contentLength + startByte else contentLength
+                    db.downloadDao().updateProgress(
+                        subjectId, startByte, STATUS_FAILED, System.currentTimeMillis()
+                    )
+                    return@use Result.failure(Exception("HTTP ${response.code}"))
+                }
 
-                    val tempFile = File(destFile.absolutePath + ".part")
-                    val output = FileOutputStream(tempFile).buffered()
-                    try {
-                        val input: InputStream? = response.body()?.byteStream()
-                        if (input != null) {
-                            input.use { stream ->
-                                var downloaded = startByte
-                                val buffer = ByteArray(8192)
-                                while (true) {
-                                    val read = stream.read(buffer)
-                                    if (read == -1) break
-                                    output.write(buffer, 0, read)
-                                    downloaded += read
+                val contentLength = response.header("Content-Length")?.toLongOrNull() ?: 0L
+                val total = if (startByte > 0) contentLength + startByte else contentLength
+                val body = response.body ?: return@use Result.failure(Exception("Empty body"))
 
-                                    // Update progress every 8KB
-                                    if (downloaded - (existing?.downloadedBytes ?: 0) >= 8192) {
-                                        db.downloadDao().updateProgress(
-                                            source.id, downloaded,
-                                            "in_progress", System.currentTimeMillis()
-                                        )
-                                    }
-                                }
+                val tempFile = File(destFile.absolutePath + ".part")
+                val append = startByte > 0 && tempFile.exists()
+
+                FileOutputStream(tempFile, append).buffered().use { output ->
+                    body.byteStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        var downloaded = startByte
+                        var lastPersisted = startByte
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read == -1) break
+                            output.write(buffer, 0, read)
+                            downloaded += read
+                            if (downloaded - lastPersisted >= PERSIST_INTERVAL_BYTES) {
+                                db.downloadDao().updateProgress(
+                                    subjectId, downloaded, STATUS_IN_PROGRESS,
+                                    System.currentTimeMillis()
+                                )
+                                lastPersisted = downloaded
                             }
                         }
                         output.flush()
-                    } finally {
-                        output.close()
+                        lastPersisted = downloaded
                     }
-
-                    // Rename .part to final file
-                    if (destFile.exists()) destFile.delete()
-                    tempFile.renameTo(destFile)
-
-                    db.downloadDao().updateProgress(
-                        source.id, actualTotal,
-                        "completed", System.currentTimeMillis()
-                    )
-
-                    Result.success(destFile)
                 }
-            } catch (e: Exception) {
-                Result.failure(e)
+
+                if (destFile.exists()) destFile.delete()
+                if (!tempFile.renameTo(destFile)) {
+                    db.downloadDao().updateProgress(
+                        subjectId, startByte, STATUS_FAILED, System.currentTimeMillis()
+                    )
+                    return@use Result.failure(Exception("Could not finalise ${destFile.name}"))
+                }
+
+                db.downloadDao().updateProgress(
+                    subjectId, if (total > 0) total else destFile.length(),
+                    STATUS_COMPLETED, System.currentTimeMillis()
+                )
+                Result.success(destFile)
             }
+        } catch (e: Exception) {
+            runCatching {
+                db.downloadDao().updateProgress(
+                    subjectId, startByte, STATUS_FAILED, System.currentTimeMillis()
+                )
+            }
+            Result.failure(e)
         }
     }
 
-    /** Gets the destination file for a download. */
     private fun destFileFor(source: PlayableSource, title: String?): File {
         val cleanTitle = cleanTitle(title)
         val res = source.resolutions.firstOrNull() ?: "unknown"
-        return File(downloadDir, "$cleanTitle_$res.mp4")
+        return File(downloadDir, "${cleanTitle}_$res.mp4")
     }
 
-    /** Sanitizes a title for use as a filename. */
-    private fun cleanTitle(title: String?): String {
-        return title?.replace("[^a-zA-Z0-9._-]".toRegex(), "_") ?: "unknown"
-    }
+    private fun cleanTitle(title: String?): String =
+        title?.replace("[^a-zA-Z0-9._-]".toRegex(), "_")?.take(80) ?: "unknown"
 
     /** Lists all downloads from Room. */
-    fun listDownloads(): Flow<List<com.tribalflix.app.download.DownloadEntity>> = db.downloadDao().getAll()
+    fun listDownloads(): Flow<List<DownloadEntity>> = db.downloadDao().getAll()
 
     /** Cancels all work and releases resources. */
     fun shutdown() {
         job.cancel()
         httpClient.dispatcher.executorService.shutdown()
+    }
+
+    companion object {
+        const val STATUS_IN_PROGRESS = "in_progress"
+        const val STATUS_COMPLETED = "completed"
+        const val STATUS_FAILED = "failed"
+        private const val PERSIST_INTERVAL_BYTES = 256L * 1024L
     }
 }

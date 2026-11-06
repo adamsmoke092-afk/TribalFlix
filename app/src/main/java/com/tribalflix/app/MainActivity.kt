@@ -8,10 +8,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import com.tribalflix.app.api.MovieBoxClient
 import com.tribalflix.app.playback.MovieBoxPlayer
 import com.tribalflix.app.repository.MovieBoxRepository
-import com.tribalflix.app.api.MovieBoxClient
-import com.tribalflix.app.ui.Screens.NavigationHost
+import com.tribalflix.app.ui.NavigationHost
 import com.tribalflix.app.ui.theme.TribalFlixTheme
 import com.tribalflix.app.viewmodel.MovieBoxViewModel
 
@@ -28,11 +30,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = MaterialTheme.colorScheme.background
-            ) {
-                TribalFlixTheme {
+            TribalFlixTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
                     NavigationHost(viewModel = viewModel, player = player)
                 }
             }
@@ -47,9 +49,9 @@ class MainActivity : ComponentActivity() {
 
 /** Simple ViewModel factory to inject the repository. */
 class MovieBoxViewModelFactory(
-    private val repository: com.tribalflix.app.repository.MovieBoxRepository
-) : androidx.lifecycle.ViewModelProvider.Factory {
+    private val repository: MovieBoxRepository
+) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
-    override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+    override fun <T : ViewModel> create(modelClass: Class<T>): T =
         MovieBoxViewModel(repository) as T
 }

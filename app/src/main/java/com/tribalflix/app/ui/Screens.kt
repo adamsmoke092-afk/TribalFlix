@@ -1,196 +1,263 @@
 package com.tribalflix.app.ui
 
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable.clickable
-import androidx.compose.foundation.layout.*
+import android.widget.Toast
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedShape
-import androidx.compose.material3.*
-import androidx.compose.material.icons.filled.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.AndroidView
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
-import com.tribalflix.app.api.CaptionTrack
 import com.tribalflix.app.api.MovieBoxClient
 import com.tribalflix.app.api.PlayableSource
 import com.tribalflix.app.api.SearchSubject
+import com.tribalflix.app.download.DownloadManager
+import com.tribalflix.app.playback.MovieBoxPlayer
 import com.tribalflix.app.player.MovieBoxResolver
 import com.tribalflix.app.player.ResolvedMovie
-import com.tribalflix.app.repository.MovieBoxRepository
-import com.tribalflix.app.playback.MovieBoxPlayer
-import com.tribalflix.app.ui.theme.TribalFlixTheme
 import com.tribalflix.app.viewmodel.MovieBoxViewModel
 import com.tribalflix.app.viewmodel.UiState
-import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.launch
 
 /**
- * Navigation host that switches between screens based on UI state.
- *
- * @param viewModel the ViewModel (owned by the Activity)
- * @param player the MovieBoxPlayer (owned by the Activity)
+ * Root navigation between search, details and playback.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NavigationHost(
     viewModel: MovieBoxViewModel,
     player: MovieBoxPlayer
 ) {
-    var showPlayer by remember { mutableStateOf(false) }
-    var currentSource by remember { mutableStateOf<PlayableSource?>(null) }
-    var currentHeaders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-
     val state by viewModel.state.collectAsState()
 
-    TribalFlixTheme {
-        Scaffold(
-            topBar = {
-                if (!showPlayer) {
-                    TopAppBar(
-                        title = { Text(text = "TribalFlix") },
-                        colors = TopAppBarDefaults.mediumTopAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.primary
-                        )
-                    )
-                }
-            },
-            floatingActionButton = if (showPlayer) null else {
-                FloatingActionButton(
-                    onClick = { /* search handled by UI state; no-op here */ },
-                    icon = { Icon(Icons.Default.Search, contentDescription = "Search") }
-                )
+    var query by remember { mutableStateOf("") }
+    var playingSource by remember { mutableStateOf<PlayableSource?>(null) }
+    var playingHeaders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    val resolver = remember { MovieBoxResolver(MovieBoxClient()) }
+
+    val activeSource = playingSource
+    if (activeSource != null) {
+        PlayerScreen(
+            player = player,
+            source = activeSource,
+            headers = playingHeaders,
+            onBack = {
+                player.stop()
+                playingSource = null
             }
-        ) { _ ->
-            if (showPlayer) {
-                PlayerScreen(
-                    player = player,
-                    source = currentSource ?: error("Player shown without source"),
-                    headers = currentHeaders,
-                    onBack = { showPlayer = false }
+        )
+        return
+    }
+
+    val play: (PlayableSource, Map<String, String>) -> Unit = { source, headers ->
+        playingSource = source
+        playingHeaders = headers
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(text = "TribalFlix") },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
-            } else {
-                when (val s = state) {
-                    is UiState.Loading -> {
-                        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-                    }
-                    is UiState.Error -> {
-                        ErrorScreen(message = s.message, onRetry = { /* no-op */ })
-                    }
-                    is UiState.SearchResults -> {
-                        SearchScreen(
-                            viewModel = viewModel,
-                            query = s.query,
-                            results = s.results,
-                            onMovieSelected = { subjectId ->
-                                viewModel.resolveMovie(subjectId)
-                            },
-                            onSourceSelected = { source, headers ->
-                                currentSource = source
-                                currentHeaders = headers
-                                showPlayer = true
-                            }
-                        )
-                    }
-                    is UiState.MovieResolved -> {
-                        DetailsScreen(
-                            viewModel = viewModel,
-                            movie = s.movie,
-                            resolver = MovieBoxResolver(client = MovieBoxClient()),
-                            onPlay = { source, headers ->
-                                currentSource = source
-                                currentHeaders = headers
-                                showPlayer = true
-                            }
-                        )
-                    }
-                    is UiState.SourceSelected -> {
-                        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-                    }
-                }
+            )
+        }
+    ) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            when (val s = state) {
+                is UiState.Idle -> SearchScreen(
+                    query = query,
+                    onQueryChange = { query = it },
+                    onSearch = { viewModel.search(query) },
+                    results = emptyList(),
+                    showHint = true,
+                    onMovieSelected = viewModel::resolveMovie
+                )
+
+                is UiState.Loading -> CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.Center)
+                )
+
+                is UiState.Error -> ErrorScreen(
+                    message = s.message,
+                    onRetry = viewModel::reset
+                )
+
+                is UiState.SearchResults -> SearchScreen(
+                    query = query,
+                    onQueryChange = { query = it },
+                    onSearch = { viewModel.search(query) },
+                    results = s.results,
+                    showHint = false,
+                    onMovieSelected = viewModel::resolveMovie
+                )
+
+                is UiState.MovieResolved -> DetailsScreen(
+                    movie = s.movie,
+                    resolver = resolver,
+                    onPlay = play,
+                    onLoadEpisode = viewModel::resolveEpisode,
+                    onBack = viewModel::back
+                )
+
+                is UiState.SourceSelected -> CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.Center)
+                )
             }
         }
     }
 }
 
-/** Simple error screen with retry. */
 @Composable
 private fun ErrorScreen(message: String, onRetry: () -> Unit) {
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text(text = "Error", style = MaterialTheme.typography.headlineMedium)
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(text = message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+        Text(text = "Something went wrong", style = MaterialTheme.typography.headlineSmall)
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error
+        )
         Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onRetry) {
-            Text(text = "Retry")
-        }
+        Button(onClick = onRetry) { Text(text = "Back to search") }
     }
 }
 
-/** Search results screen. */
 @Composable
 private fun SearchScreen(
-    viewModel: MovieBoxViewModel,
     query: String,
+    onQueryChange: (String) -> Unit,
+    onSearch: () -> Unit,
     results: List<SearchSubject>,
-    onMovieSelected: (String) -> Unit,
-    onSourceSelected: (PlayableSource, Map<String, String>) -> Unit
+    showHint: Boolean,
+    onMovieSelected: (String) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
-        Text(
-            text = "Search results for '$query'",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(16.dp)
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            singleLine = true,
+            label = { Text(text = "Search movies and TV") },
+            trailingIcon = {
+                IconButton(onClick = onSearch) {
+                    Icon(Icons.Default.Search, contentDescription = "Search")
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onSearch() })
         )
-        if (results.isEmpty()) {
-            Text(text = "No results found.", modifier = Modifier.padding(16.dp))
-        } else {
-            LazyColumn(
+
+        when {
+            showHint -> Text(
+                text = "Type a title and press search.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+
+            results.isEmpty() -> Text(
+                text = "No results found.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+
+            else -> LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(16.dp)
             ) {
-                items(results) { subject ->
+                items(results, key = { it.subjectId }) { subject ->
                     Card(
-                        modifier = Modifier.fillMaxWidth().paddingBottom(8.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(12.dp)
-                                .clickable { onMovieSelected(subject.subjectId) },
+                                .clickable { onMovieSelected(subject.subjectId) }
+                                .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            subject.poster?.let {
+                            if (!subject.poster.isNullOrBlank()) {
                                 AsyncImage(
-                                    model = it,
+                                    model = subject.poster,
                                     contentDescription = null,
                                     modifier = Modifier
                                         .size(64.dp)
-                                        .clip(RoundedShape(4.dp))
+                                        .clip(RoundedCornerShape(4.dp))
                                 )
+                                Spacer(modifier = Modifier.width(12.dp))
                             }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = subject.title ?: "Unknown",
                                     style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 2
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                if (subject.year != null) {
+                                val meta = listOfNotNull(
+                                    subject.year?.toString(),
+                                    subject.rating?.let { rating -> "%.1f".format(rating) }
+                                ).joinToString(" • ")
+                                if (meta.isNotEmpty()) {
                                     Text(
-                                        text = "${subject.year}",
+                                        text = meta,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -204,107 +271,198 @@ private fun SearchScreen(
     }
 }
 
-/** Movie/TV details screen with play button and source selection. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DetailsScreen(
-    viewModel: MovieBoxViewModel,
     movie: ResolvedMovie,
     resolver: MovieBoxResolver,
-    onPlay: (PlayableSource, Map<String, String>) -> Unit
+    onPlay: (PlayableSource, Map<String, String>) -> Unit,
+    onLoadEpisode: (String, Int, Int) -> Unit,
+    onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val downloader = remember { DownloadManager(context) }
+
+    var season by remember { mutableStateOf("1") }
+    var episode by remember { mutableStateOf("1") }
+
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text(text = movie.title ?: "Details") },
             navigationIcon = {
-                IconButton(onClick = { /* handled by parent */ }) {
+                IconButton(onClick = onBack) {
                     Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                 }
             },
-            colors = TopAppBarDefaults.mediumTopAppBarColors(
+            colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.primaryContainer
             )
         )
 
-        LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(16.dp)
+        ) {
             item {
+                if (!movie.poster.isNullOrBlank()) {
+                    AsyncImage(
+                        model = movie.poster,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(2f / 3f)
+                            .clip(RoundedCornerShape(12.dp))
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
                 Text(
                     text = movie.title ?: "Unknown Title",
-                    style = MaterialTheme.typography.headlineMedium
+                    style = MaterialTheme.typography.headlineSmall
                 )
-                if (movie.year != null) {
+                val meta = listOfNotNull(
+                    movie.year?.toString(),
+                    movie.rating?.let { rating -> "%.1f".format(rating) }
+                ).joinToString(" • ")
+                if (meta.isNotEmpty()) {
                     Text(
-                        text = "${movie.year} • Rating: ${movie.rating?.toString() ?: "N/A"}",
+                        text = meta,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                movie.synopsis?.let {
+                movie.synopsis?.takeIf { it.isNotBlank() }?.let { synopsis ->
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = it, style = MaterialTheme.typography.bodyMedium)
+                    Text(text = synopsis, style = MaterialTheme.typography.bodyMedium)
                 }
             }
 
             item {
-                if (movie.directSources.isNotEmpty()) {
-                    Text(
-                        text = "Direct MP4 Sources",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(top = 16.dp)
-                    )
-                    val bestDirect = resolver.selectBestDirect(movie.directSources)
-                    bestDirect?.let { source ->
-                        val headers = resolver.headersFor(source)
-                        Button(
-                            onClick = { onPlay(source, headers) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(text = "Play Direct MP4 (${source.resolutions.firstOrNull() ?: "?"})")
+                val bestDash = resolver.selectBestDash(movie.dashSources)
+                val bestDirect = resolver.selectBestDirect(movie.directSources)
+                val best = bestDash ?: bestDirect
+
+                if (best != null) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = { onPlay(best, resolver.headersFor(best)) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(text = "Play")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (bestDirect != null) {
+                            Button(
+                                onClick = { onPlay(bestDirect, resolver.headersFor(bestDirect)) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(text = "Direct MP4")
+                            }
+                        }
+                        if (bestDash != null) {
+                            Button(
+                                onClick = { onPlay(bestDash, resolver.headersFor(bestDash)) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(text = "DASH")
+                            }
                         }
                     }
-                }
-            }
 
-            item {
-                if (movie.dashSources.isNotEmpty()) {
-                    Text(
-                        text = "DASH Streams",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(top = 16.dp)
-                    )
-                    val bestDash = resolver.selectBestDash(movie.dashSources)
-                    bestDash?.let { source ->
-                        val headers = resolver.headersFor(source)
-                        Button(
-                            onClick = { onPlay(source, headers) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(text = "Play DASH (${source.format})")
-                        }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            val downloadSource = bestDirect ?: best
+                            scope.launch {
+                                val result = downloader.startDownload(
+                                    source = downloadSource,
+                                    title = movie.title,
+                                    headers = resolver.headersFor(downloadSource),
+                                    subjectId = movie.subjectId
+                                )
+                                val message = result.fold(
+                                    onSuccess = { file -> "Saved ${file.name}" },
+                                    onFailure = { error -> "Download failed: ${error.message}" }
+                                )
+                                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(text = "Download")
                     }
+                } else {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "No playable sources found.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
             }
 
             item {
-                if (movie.subtitles.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(24.dp))
+                Text(text = "TV episode", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = season,
+                        onValueChange = { season = it.filter(Char::isDigit) },
+                        label = { Text(text = "Season") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = episode,
+                        onValueChange = { episode = it.filter(Char::isDigit) },
+                        label = { Text(text = "Episode") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        val selectedSeason = season.toIntOrNull() ?: 1
+                        val selectedEpisode = episode.toIntOrNull() ?: 1
+                        onLoadEpisode(movie.subjectId, selectedSeason, selectedEpisode)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "Load episode")
+                }
+            }
+
+            if (movie.subtitles.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(24.dp))
                     Text(
                         text = "Subtitles (${movie.subtitles.size})",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(top = 16.dp)
+                        style = MaterialTheme.typography.titleMedium
                     )
-                    items(movie.subtitles) { sub ->
-                        Text(
-                            text = "${sub.language} (${sub.size} bytes)",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
+                }
+                items(movie.subtitles) { subtitle ->
+                    Text(
+                        text = "${subtitle.language} (${subtitle.size} bytes)",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
                 }
             }
         }
     }
 }
 
-/** Fullscreen player screen. */
 @Composable
 private fun PlayerScreen(
     player: MovieBoxPlayer,
@@ -312,46 +470,29 @@ private fun PlayerScreen(
     headers: Map<String, String>,
     onBack: () -> Unit
 ) {
-    var playerStarted by remember { mutableStateOf(false) }
+    LaunchedEffect(source.url) {
+        player.play(source, headers)
+    }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Capture the ExoPlayer reference before the PlayerView apply block,
-        // since 'player' inside apply refers to PlayerView.player.
-        val exoPlayerRef = player.exoPlayer
-
+    Box(modifier = Modifier.fillMaxSize().padding(8.dp)) {
         AndroidView(
-            factory = { context -> PlayerView(context) },
-            update = { view -> view.player = exoPlayerRef },
-            modifier = Modifier.fillMaxSize()
-        )
-
-        if (!playerStarted) {
-            LaunchedEffect(Unit) {
-                player.play(source, headers)
-                playerStarted = true
-            }
-        }
-
-        Row(
+            factory = { ctx -> PlayerView(ctx).also { it.useController = true } },
+            update = { view -> view.player = player.exoPlayer },
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
-                .height(56.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .aspectRatio(16f / 9f)
+                .align(Alignment.Center)
+        )
+
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.align(Alignment.TopStart)
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Back")
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = source.format,
-                style = MaterialTheme.typography.titleMedium,
-                color = Color.White
+            Icon(
+                Icons.Default.ArrowBack,
+                contentDescription = "Back",
+                tint = Color.White
             )
-            Spacer(modifier = Modifier.weight(1f))
-            IconButton(onClick = { player.pause() }) {
-                Icon(Icons.Default.Pause, contentDescription = "Pause")
-            }
         }
     }
 }

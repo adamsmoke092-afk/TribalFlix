@@ -2,6 +2,8 @@ package com.tribalflix.app.api
 
 import com.tribalflix.app.crypto.*
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -88,36 +90,17 @@ data class ResolvedSources(
     val subtitles: List<CaptionTrack> = emptyList()
 )
 
-class MovieBoxClient private constructor(
-    private val httpClient: OkHttpClient,
-    private val hostPool: List<String>,
-    private val deviceProfile: DeviceProfile,
-    private val spoofedIp: String
+class MovieBoxClient(
+    private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val hostPool: List<String> = DEFAULT_HOST_POOL,
+    private val deviceProfile: DeviceProfile = generateDeviceProfile(),
+    private val spoofedIp: String = randomSpoofedIp()
 ) {
 
     private var token: String? = null
     private var userId: String? = null
     private var expiresAt: Long = 0
     private var activeHostIdx: Int = 0
-
-    constructor(hostPool: List<String> = DEFAULT_HOST_POOL) : this(
-        httpClient = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .build(),
-        hostPool = hostPool,
-        deviceProfile = generateDeviceProfile(),
-        spoofedIp = randomSpoofedIp()
-    )
-
-    constructor(httpClient: OkHttpClient, hostPool: List<String> = DEFAULT_HOST_POOL) : this(
-        httpClient = httpClient,
-        hostPool = hostPool,
-        deviceProfile = generateDeviceProfile(),
-        spoofedIp = randomSpoofedIp()
-    )
 
     suspend fun visitorLogin(): VisitorLoginResult = withContext(Dispatchers.IO) {
         val body = JSONObject().toString()
@@ -358,7 +341,9 @@ class MovieBoxClient private constructor(
         }
 
     private suspend fun request(method: String, pathAndQuery: String, body: String?): JSONObject {
-        ensureSession()
+        // The visitor-login call must not call ensureSession(), or it would
+        // recurse into itself forever on the very first request.
+        if (pathAndQuery != PATH_VISITOR_LOGIN) ensureSession()
 
         var lastError: Exception? = null
         val attempts = hostPool.size
@@ -369,13 +354,18 @@ class MovieBoxClient private constructor(
             val headers = buildHeaders(method, url, body)
 
             try {
-                val mediaType = MediaType.Companion.parse("application/json")!!
-                val requestBody = if (body == null) null else RequestBody.create(body, mediaType)
-                val finalRequest = when {
-                    method.equals("GET", ignoreCase = true) ->
-                        Request.Builder().url(url).headers(Headers.of(headers)).get().build()
-                    else ->
-                        Request.Builder().url(url).headers(Headers.of(headers)).post(requestBody).build()
+                val mediaType = "application/json".toMediaType()
+                val requestBody = body?.toRequestBody(mediaType)
+                val headerBuilder = Headers.Builder()
+                headers.forEach { (name, value) -> headerBuilder.add(name, value) }
+                val okHeaders = headerBuilder.build()
+
+                val finalRequest = if (method.equals("GET", ignoreCase = true)) {
+                    Request.Builder().url(url).headers(okHeaders).get().build()
+                } else {
+                    Request.Builder().url(url).headers(okHeaders)
+                        .post(requestBody ?: ByteArray(0).toRequestBody(null))
+                        .build()
                 }
 
                 val response = httpClient.newCall(finalRequest).execute()
@@ -450,61 +440,6 @@ class MovieBoxClient private constructor(
         return headers
     }
 
-    private fun generateDeviceProfile(): DeviceProfile {
-        val versionCode = listOf(50020117, 50020118, 50020119, 50020120, 50020121).random()
-        val androidVersions = listOf(
-            "9" to "PQ3A.190605.03081104",
-            "10" to "QP1A.191005.007.A3",
-            "11" to "RP1A.200720.011",
-            "12" to "S1B.220414.015",
-            "13" to "TQ2A.230405.003"
-        )
-        val redmiDevices = listOf(
-            "23078RKD5C" to "Redmi",
-            "2201117TY" to "Redmi",
-            "2201117TG" to "Redmi",
-            "22101316G" to "Redmi",
-            "21121210G" to "Redmi",
-            "M2012K11AG" to "Redmi"
-        )
-        val (androidVersion, buildId) = androidVersions.random()
-        val (model, brand) = redmiDevices.random()
-        val deviceId = (1..32).map { "0123456789abcdef".random() }.joinToString("")
-        val gaid = UUID.randomUUID().toString()
-
-        val ua = "com.community.oneroom/$versionCode (Linux; U; Android $androidVersion; en_US; $model; Build/$buildId; Cronet/135.0.7012.3)"
-
-        val info = mapOf(
-            "package_name" to "com.community.oneroom",
-            "version_name" to "4.0.01.0813.03",
-            "version_code" to versionCode,
-            "os" to "android",
-            "os_version" to androidVersion,
-            "install_ch" to "ps",
-            "device_id" to deviceId,
-            "install_store" to "ps",
-            "gaid" to gaid,
-            "brand" to brand,
-            "model" to model,
-            "system_language" to "en",
-            "net" to "NETWORK_WIFI",
-            "region" to "US",
-            "timezone" to "America/New_York",
-            "sp_code" to "40401",
-            "X-Play-Mode" to "2"
-        )
-        return DeviceProfile(ua, info)
-    }
-
-    private fun randomSpoofedIp(): String {
-        val prefixes = listOf(
-            "103.241", "49.36", "117.195", "106.198", "122.162",
-            "157.32", "182.70", "103.58", "27.60", "59.90"
-        )
-        val p = prefixes.random()
-        return "$p.${Random.nextInt(1, 255)}.${Random.nextInt(1, 255)}"
-    }
-
     private fun parseSearchSubjects(response: JSONObject): List<SearchSubject> {
         val results = response.optJSONArray("results")
         if (results == null) return emptyList()
@@ -525,6 +460,68 @@ class MovieBoxClient private constructor(
         }
         return out
     }
+}
+
+private fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(10, TimeUnit.SECONDS)
+    .readTimeout(15, TimeUnit.SECONDS)
+    .writeTimeout(15, TimeUnit.SECONDS)
+    .retryOnConnectionFailure(true)
+    .build()
+
+private fun generateDeviceProfile(): DeviceProfile {
+    val versionCode = listOf(50020117, 50020118, 50020119, 50020120, 50020121).random()
+    val androidVersions = listOf(
+        "9" to "PQ3A.190605.03081104",
+        "10" to "QP1A.191005.007.A3",
+        "11" to "RP1A.200720.011",
+        "12" to "S1B.220414.015",
+        "13" to "TQ2A.230405.003"
+    )
+    val redmiDevices = listOf(
+        "23078RKD5C" to "Redmi",
+        "2201117TY" to "Redmi",
+        "2201117TG" to "Redmi",
+        "22101316G" to "Redmi",
+        "21121210G" to "Redmi",
+        "M2012K11AG" to "Redmi"
+    )
+    val (androidVersion, buildId) = androidVersions.random()
+    val (model, brand) = redmiDevices.random()
+    val deviceId = (1..32).map { "0123456789abcdef".random() }.joinToString("")
+    val gaid = UUID.randomUUID().toString()
+
+    val ua = "com.community.oneroom/$versionCode (Linux; U; Android $androidVersion; en_US; $model; Build/$buildId; Cronet/135.0.7012.3)"
+
+    val info = mapOf<String, Any>(
+        "package_name" to "com.community.oneroom",
+        "version_name" to "4.0.01.0813.03",
+        "version_code" to versionCode,
+        "os" to "android",
+        "os_version" to androidVersion,
+        "install_ch" to "ps",
+        "device_id" to deviceId,
+        "install_store" to "ps",
+        "gaid" to gaid,
+        "brand" to brand,
+        "model" to model,
+        "system_language" to "en",
+        "net" to "NETWORK_WIFI",
+        "region" to "US",
+        "timezone" to "America/New_York",
+        "sp_code" to "40401",
+        "X-Play-Mode" to "2"
+    )
+    return DeviceProfile(ua, info)
+}
+
+private fun randomSpoofedIp(): String {
+    val prefixes = listOf(
+        "103.241", "49.36", "117.195", "106.198", "122.162",
+        "157.32", "182.70", "103.58", "27.60", "59.90"
+    )
+    val p = prefixes.random()
+    return "$p.${Random.nextInt(1, 255)}.${Random.nextInt(1, 255)}"
 }
 
 /** Extracts MPD URL from Edge-Cache signed cookie (urlprefix=...). */
