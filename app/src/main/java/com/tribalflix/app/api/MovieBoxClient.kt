@@ -117,23 +117,31 @@ class MovieBoxClient(
         }
         .build()
 
-    private var token: String? = null
-    private var userId: String? = null
-    private var expiresAt: Long = 0
+    private var token: String? = SessionCache.token
+    private var userId: String? = SessionCache.userId
+    private var expiresAt: Long = SessionCache.expiresAt
     private var activeHostIdx: Int = 0
 
     suspend fun visitorLogin(): VisitorLoginResult = withContext(Dispatchers.IO) {
         val body = JSONObject().toString()
         val response = request("POST", PATH_VISITOR_LOGIN, body)
         val token = response.optString("token") ?: error("Visitor login failed: no token in $response")
-        val uid = response.optString("uid") ?: response.optString("userId")
-        val exp = response.optLong("exp", -1).takeIf { it > 0 }
+
+        // client.py derives uid/exp from the JWT payload, not the response body.
+        val (claimUid, claimExp) = parseJwtClaims(token)
+        val uid = response.optString("uid")
+            .ifBlank { response.optString("userId") }
+            .ifBlank { claimUid.orEmpty() }
+            .takeIf { it.isNotBlank() }
+        val exp = claimExp.takeIf { it > 0 }
+            ?: response.optLong("exp", -1).takeIf { it > 0 }
 
         // Inside withContext the implicit receiver is the CoroutineScope, so the
         // client's own fields must be qualified explicitly.
         this@MovieBoxClient.token = token
         this@MovieBoxClient.userId = uid
         this@MovieBoxClient.expiresAt = exp ?: 0
+        SessionCache.save(token, uid, exp ?: 0)
 
         VisitorLoginResult(token = token, userId = uid, expiresAt = exp)
     }
@@ -160,7 +168,18 @@ class MovieBoxClient(
     suspend fun getDetails(subjectId: String): JSONObject =
         withContext(Dispatchers.IO) {
             val path = "$PATH_SUBJECT_GET?subjectId=$subjectId"
-            request("GET", path, null)
+            val details = request("GET", path, null)
+            // client.py attaches season-info for TV series (subjectType == 2).
+            val subject = details.optJSONObject("subject") ?: details
+            val stype = subject.optInt("subjectType", subject.optInt("stype", 1))
+            if (stype == 2) {
+                try {
+                    details.put("seasons", getSeasonInfo(subjectId))
+                } catch (e: Exception) {
+                    // seasons are optional; details still usable without them
+                }
+            }
+            details
         }
 
     suspend fun getSeasonInfo(subjectId: String): JSONObject =
@@ -381,7 +400,14 @@ class MovieBoxClient(
 
             try {
                 val mediaType = "application/json".toMediaType()
-                val requestBody = body?.toRequestBody(mediaType)
+                // Must stay a BYTE body. OkHttp's String.toRequestBody rewrites
+                // the media type to "application/json; charset=utf-8" (31 chars),
+                // but x-tr-signature is computed over "application/json" (16).
+                // That mismatch makes the gateway reject the request with 407,
+                // which is why a bare SSLSocket/HttpURLConnection succeed with
+                // the identical signature. ByteArray.toRequestBody passes the
+                // media type through untouched.
+                val requestBody = body?.toByteArray()?.toRequestBody(mediaType)
                 val headerBuilder = Headers.Builder()
                 headers.forEach { (name, value) -> headerBuilder.add(name, value) }
                 val okHeaders = headerBuilder.build()
@@ -404,9 +430,15 @@ class MovieBoxClient(
                         val userData = JSONObject(xUser)
                         val newToken = userData.optString("token")
                         if (newToken.isNotBlank()) {
+                            val (claimUid, claimExp) = parseJwtClaims(newToken)
+                            val newUid = userData.optString("uid")
+                                .ifBlank { userData.optString("userId") }
+                                .ifBlank { claimUid.orEmpty() }
+                                .takeIf { it.isNotBlank() }
                             this@MovieBoxClient.token = newToken
-                            this@MovieBoxClient.userId =
-                                userData.optString("uid", userData.optString("userId"))
+                            this@MovieBoxClient.userId = newUid
+                            if (claimExp > 0) this@MovieBoxClient.expiresAt = claimExp
+                            SessionCache.save(newToken, newUid, this@MovieBoxClient.expiresAt)
                         }
                     } catch (e: Exception) { /* ignore */ }
                 }
@@ -415,6 +447,7 @@ class MovieBoxClient(
 
                 if (response.code == 401 || response.code == 403) {
                     token = null
+                    SessionCache.save(null, null, 0)
                     if (pathAndQuery != PATH_VISITOR_LOGIN) {
                         try { visitorLogin(); continue } catch (e: Exception) { /* fall through */ }
                     }
@@ -664,5 +697,25 @@ fun extractCloudFrontManifest(signCookie: String): String? {
         return if ("/dash/" in resource) resource.removeSuffix("*/") + "/index.mpd" else null
     } catch (e: Exception) {
         return null
+    }
+}
+
+/**
+ * Decodes a JWT payload to recover the authenticated uid and expiry, matching
+ * `client.py`'s `_parse_jwt_claims`. Returns (uid, expSeconds); uid is null and
+ * exp is 0 when the token is not a decodable JWT.
+ */
+fun parseJwtClaims(token: String): Pair<String?, Long> {
+    return try {
+        val parts = token.split(".")
+        if (parts.size < 2) return null to 0L
+        val payload = JSONObject(String(base64UrlDecode(parts[1])))
+        val uid = payload.optString("userId")
+            .ifBlank { payload.optString("uid") }
+            .ifBlank { payload.optString("sub") }
+            .takeIf { it.isNotBlank() }
+        uid to payload.optLong("exp", 0L)
+    } catch (e: Exception) {
+        null to 0L
     }
 }
