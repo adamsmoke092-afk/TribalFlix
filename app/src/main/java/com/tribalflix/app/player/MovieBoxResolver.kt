@@ -85,8 +85,10 @@ class MovieBoxResolver(private val client: MovieBoxClient) {
     fun headersFor(source: PlayableSource): Map<String, String> {
         val headers = LinkedHashMap<String, String>()
         headers["User-Agent"] = source.userAgent
-        headers["Referer"] = source.referer
-        source.cookie?.let { headers["Cookie"] = it }
+        // DASH needs the anti-hotlinking referer; direct MP4 must NOT send it
+        // (returns HTTP 429) — see FINDINGS.md §5.2.
+        if (source.referer.isNotBlank()) headers["Referer"] = source.referer
+        source.cookie?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
         return headers
     }
 }

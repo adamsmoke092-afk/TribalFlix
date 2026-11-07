@@ -92,11 +92,30 @@ data class ResolvedSources(
 )
 
 class MovieBoxClient(
-    private val httpClient: OkHttpClient = defaultHttpClient(),
     private val hostPool: List<String> = DEFAULT_HOST_POOL,
     private val deviceProfile: DeviceProfile = generateDeviceProfile(),
     private val spoofedIp: String = randomSpoofedIp()
 ) {
+
+    /**
+     * Diagnostic: header names + value lengths OkHttp actually put on the wire.
+     * Compared against client.py's header set to spot extra/altered headers.
+     */
+    private val wireHeaders = java.util.concurrent.atomic.AtomicReference("")
+
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .proxy(Proxy.NO_PROXY)
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .addNetworkInterceptor { chain ->
+            val req = chain.request()
+            wireHeaders.set(req.headers.joinToString(", ") { "${it.first}(${it.second.length})" })
+            chain.proceed(req)
+        }
+        .build()
 
     private var token: String? = null
     private var userId: String? = null
@@ -316,7 +335,9 @@ class MovieBoxClient(
                                 resolutions = listOf("${resNum}p"),
                                 url = resolvedLink,
                                 cookie = null,
-                                referer = STREAM_REFERER,
+                                // Direct MP4 rejects the DASH Referer with HTTP 429
+                                // (FINDINGS.md §5.2) — only the User-Agent is allowed.
+                                referer = "",
                                 userAgent = deviceProfile.userAgent,
                                 resourceId = resId.takeIf { it.isNotBlank() },
                                 sizeBytes = item.optLong("size")
@@ -433,7 +454,8 @@ class MovieBoxClient(
 
         throw RuntimeException(
             "All $attempts hosts failed for $method $pathAndQuery -> " +
-                failures.joinToString(" | ") + " | transport probe: $probe",
+                failures.joinToString(" | ") + " | transport probe: $probe" +
+                " | sent: ${wireHeaders.get()}",
             lastError
         )
     }
@@ -556,20 +578,6 @@ class MovieBoxClient(
         return out
     }
 }
-
-private fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
-    .connectTimeout(10, TimeUnit.SECONDS)
-    .readTimeout(15, TimeUnit.SECONDS)
-    .writeTimeout(15, TimeUnit.SECONDS)
-    .retryOnConnectionFailure(true)
-    // Transport parity with the known-good Python client (urllib):
-    // urllib ignores the platform proxy and speaks HTTP/1.1 only. OkHttp
-    // otherwise honours Android's system proxy and may negotiate HTTP/2,
-    // which is the remaining difference on-device (a bare 407 on a direct
-    // connection).
-    .proxy(Proxy.NO_PROXY)
-    .protocols(listOf(Protocol.HTTP_1_1))
-    .build()
 
 private fun generateDeviceProfile(): DeviceProfile {
     val versionCode = listOf(50020117, 50020118, 50020119, 50020120, 50020121).random()
