@@ -6,7 +6,7 @@ import com.tribalflix.app.api.PlayableSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -32,7 +32,10 @@ class DownloadManager private constructor(
     override val coroutineContext: CoroutineContext = job + Dispatchers.IO
 
     private val downloadDir: File =
-        File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "TribalFlix")
+        File(
+            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir,
+            "TribalFlix"
+        )
 
     init {
         downloadDir.mkdirs()
@@ -59,12 +62,15 @@ class DownloadManager private constructor(
         title: String?,
         headers: Map<String, String>,
         subjectId: String = source.id
-    ): Result<File> = coroutineScope {
+    ): Result<File> = withContext(Dispatchers.IO) {
+        // Callers typically launch from a Compose/UI scope (Main dispatcher).
+        // OkHttp execute() and file I/O are blocking, so force IO here or
+        // Android throws NetworkOnMainThreadException (message == null).
         val destFile = destFileFor(source, title)
         val existing = db.downloadDao().getBySubjectId(subjectId)
 
         if (existing?.status == STATUS_COMPLETED && destFile.exists()) {
-            return@coroutineScope Result.success(destFile)
+            return@withContext Result.success(destFile)
         }
 
         val startByte = if (existing != null) existing.downloadedBytes else 0L

@@ -44,6 +44,9 @@ dependencies {
 
     // Media3 1.3.1
     implementation("androidx.media3:media3-exoplayer:1.3.1")
+    // Required for DASH: DefaultMediaSourceFactory resolves the MPD source
+    // factory reflectively and throws if this module is absent.
+    implementation("androidx.media3:media3-exoplayer-dash:1.3.1")
     implementation("androidx.media3:media3-session:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
 

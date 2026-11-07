@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,6 +57,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.tribalflix.app.api.MovieBoxClient
@@ -379,26 +382,40 @@ private fun DetailsScreen(
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(
-                        onClick = {
-                            val downloadSource = bestDirect ?: best
-                            scope.launch {
-                                val result = downloader.startDownload(
-                                    source = downloadSource,
-                                    title = movie.title,
-                                    headers = resolver.headersFor(downloadSource),
-                                    subjectId = movie.subjectId
-                                )
-                                val message = result.fold(
-                                    onSuccess = { file -> "Saved ${file.name}" },
-                                    onFailure = { error -> "Download failed: ${error.message}" }
-                                )
-                                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(text = "Download")
+                    if (bestDirect != null) {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    val result = downloader.startDownload(
+                                        source = bestDirect,
+                                        title = movie.title,
+                                        headers = resolver.headersFor(bestDirect),
+                                        subjectId = movie.subjectId
+                                    )
+                                    val message = result.fold(
+                                        onSuccess = { file -> "Saved ${file.name}" },
+                                        onFailure = { error ->
+                                            // Include the type: some Android exceptions
+                                            // (e.g. NetworkOnMainThreadException) have a
+                                            // null message.
+                                            "Download failed: ${error.javaClass.simpleName}: ${error.message}"
+                                        }
+                                    )
+                                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(text = "Download")
+                        }
+                    } else {
+                        // A DASH manifest is not a file — saving it would just
+                        // produce an unusable .mpd. Only direct MP4 is downloadable.
+                        Text(
+                            text = "DASH only — no direct file to download.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 } else {
                     Spacer(modifier = Modifier.height(16.dp))
@@ -475,8 +492,27 @@ private fun PlayerScreen(
     headers: Map<String, String>,
     onBack: () -> Unit
 ) {
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    // Surface playback failures instead of dying silently on a black screen.
+    DisposableEffect(player.exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                errorText = "${error.errorCodeName}: ${error.message}"
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
+
     LaunchedEffect(source.url) {
-        player.play(source, headers)
+        errorText = null
+        try {
+            player.play(source, headers)
+        } catch (e: Exception) {
+            // A missing media module or unsupported manifest surfaces here.
+            errorText = "${e.javaClass.simpleName}: ${e.message}"
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize().padding(8.dp)) {
@@ -497,6 +533,18 @@ private fun PlayerScreen(
                 Icons.Default.ArrowBack,
                 contentDescription = "Back",
                 tint = Color.White
+            )
+        }
+
+        errorText?.let { message ->
+            Text(
+                text = "Playback failed\n$message",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(8.dp)
             )
         }
     }
