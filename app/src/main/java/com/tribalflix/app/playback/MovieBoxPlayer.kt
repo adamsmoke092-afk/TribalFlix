@@ -1,6 +1,7 @@
 package com.tribalflix.app.playback
 
 import android.content.Context
+import android.net.Uri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -160,12 +161,16 @@ class MovieBoxPlayer private constructor(
             // We always serve WebVTT bytes, so pin the MIME type — otherwise
             // ExoPlayer infers it from the remote ".srt" extension and finds
             // no matching decoder.
-            val subtitleItem = MediaItem.Builder()
-                .setUri(subtitleUrl)
+            val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitleUrl))
                 .setMimeType(MimeTypes.TEXT_VTT)
+                .setLanguage("en")
+                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                 .build()
+            // Media3 1.3.1's SingleSampleMediaSource.Factory is NOT a
+            // MediaSource.Factory: its only create overload takes
+            // (SubtitleConfiguration, durationUs).
             val subtitleSource = SingleSampleMediaSource.Factory(subtitleDataSourceFactory)
-                .createMediaSource(subtitleItem)
+                .createMediaSource(subtitleConfig, C.TIME_UNSET)
             MergingMediaSource(videoSource, subtitleSource)
         } else {
             videoSource
