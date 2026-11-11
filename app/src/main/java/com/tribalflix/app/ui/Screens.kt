@@ -36,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -493,6 +494,8 @@ private fun PlayerScreen(
     onBack: () -> Unit
 ) {
     var errorText by remember { mutableStateOf<String?>(null) }
+    var subtitlesOn by remember { mutableStateOf(!source.subtitleUrl.isNullOrBlank()) }
+    val hasSubtitles = !source.subtitleUrl.isNullOrBlank()
 
     // Surface playback failures instead of dying silently on a black screen.
     DisposableEffect(player.exoPlayer) {
@@ -534,6 +537,23 @@ private fun PlayerScreen(
                 contentDescription = "Back",
                 tint = Color.White
             )
+        }
+
+        if (hasSubtitles) {
+            // The sidecar track is merged into the source; toggling rebuilds
+            // the media source with the track enabled or disabled.
+            TextButton(
+                onClick = {
+                    subtitlesOn = !subtitlesOn
+                    player.selectSubtitleTrack(if (subtitlesOn) 0 else -1)
+                },
+                modifier = Modifier.align(Alignment.TopEnd)
+            ) {
+                Text(
+                    text = if (subtitlesOn) "CC On" else "CC Off",
+                    color = Color.White
+                )
+            }
         }
 
         errorText?.let { message ->

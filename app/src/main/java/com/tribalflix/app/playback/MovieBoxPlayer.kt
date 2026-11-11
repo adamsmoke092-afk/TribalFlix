@@ -4,25 +4,37 @@ import android.content.Context
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.ui.PlayerView
+import com.tribalflix.app.api.CaptionTrack
 import com.tribalflix.app.api.PlayableSource
 
 /**
  * Media3 ExoPlayer wrapper for TribalFlix playback.
+ *
  * Applies per-stream headers (User-Agent, Referer, Cookie) to every request,
- * including DASH manifest and segment requests.
+ * including DASH manifest and segment requests. When [PlayableSource.subtitleUrl]
+ * is present, the video source is merged with a sidecar subtitle track (SRT is
+ * converted to WebVTT by [SubtitleDataSourceFactory]) so ExoPlayer renders
+ * captions natively.
  *
  * The media-source factory is fixed when the player is built. Each stream's
  * headers are applied by mutating [httpDataSourceFactory] just before prepare,
  * because data sources are created lazily from that same factory instance.
  */
-class MovieBoxPlayer private constructor(private val context: Context) {
+class MovieBoxPlayer private constructor(
+    private val context: Context,
+    private val subtitleDataSourceFactory: SubtitleDataSourceFactory
+) {
 
     private val trackSelector = DefaultTrackSelector(context)
 
@@ -44,6 +56,16 @@ class MovieBoxPlayer private constructor(private val context: Context) {
 
     private var currentSource: PlayableSource? = null
 
+    /** Subtitle tracks available for the current source, or empty list. */
+    val subtitleTracks: List<CaptionTrack>
+        get() = currentSource?.subtitleUrl?.takeIf { it.isNotBlank() }
+            ?.let { listOf(CaptionTrack(language = "Subtitle", url = it, size = 0)) }
+            ?: emptyList()
+
+    /** Index of the selected subtitle track (0), or -1 when disabled. */
+    var subtitleTrackIndex: Int = -1
+        private set
+
     /** Binds a PlayerView for UI and controls. */
     fun bindView(playerView: PlayerView) {
         playerView.player = player
@@ -53,9 +75,10 @@ class MovieBoxPlayer private constructor(private val context: Context) {
     fun release() {
         player.release()
         currentSource = null
+        subtitleTrackIndex = -1
     }
 
-    /** The underlying ExoPlayer, for binding to PlayerView. */
+    /** The underlying ExoPlayer, for binding to PlayerView and MediaSession. */
     val exoPlayer: ExoPlayer
         get() = player
 
@@ -88,13 +111,68 @@ class MovieBoxPlayer private constructor(private val context: Context) {
         player.removeListener(listener)
     }
 
-    /** Loads a playable source with its required headers. */
+    /**
+     * Selects a subtitle track: 0 enables the sidecar track, -1 disables it.
+     * Rebuilds the media source, preserving position and play/pause state.
+     */
+    fun selectSubtitleTrack(index: Int) {
+        val enabled = index >= 0 && subtitleTracks.isNotEmpty()
+        val target = if (enabled) 0 else -1
+        if (target == subtitleTrackIndex) return
+        subtitleTrackIndex = target
+        currentSource?.let { source ->
+            val position = player.currentPosition
+            val wasPlaying = player.playWhenReady
+            load(source, headersFor(source))
+            player.seekTo(position)
+            player.playWhenReady = wasPlaying
+        }
+    }
+
+    /** Builds the HTTP headers needed to play a given source (UA, Referer, Cookie). */
+    fun headersFor(source: PlayableSource): Map<String, String> {
+        val headers = LinkedHashMap<String, String>()
+        headers["User-Agent"] = source.userAgent
+        // DASH needs the anti-hotlinking referer; direct MP4 must NOT send it
+        // (returns HTTP 429) — see FINDINGS.md §5.2.
+        if (source.referer.isNotBlank()) headers["Referer"] = source.referer
+        source.cookie?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
+        return headers
+    }
+
+    /** Loads a playable source with its required headers and optional subtitle. */
     fun load(source: PlayableSource, headers: Map<String, String>) {
         currentSource = source
-        // Explicit User-Agent wins over the data source's default UA.
+        val subtitleUrl = source.subtitleUrl
+        // Default to subtitles ON when the source carries a track.
+        subtitleTrackIndex = if (!subtitleUrl.isNullOrBlank()) 0 else -1
+
+        // Per-stream headers must be installed BEFORE createMediaSource(): the
+        // DASH/MP4 data sources are created lazily from this same factory.
         httpDataSourceFactory.setUserAgent(source.userAgent)
         httpDataSourceFactory.setDefaultRequestProperties(headers)
-        player.setMediaItem(MediaItem.fromUri(source.url))
+
+        val videoItem = MediaItem.fromUri(source.url)
+        val videoSource = mediaSourceFactory.createMediaSource(videoItem)
+
+        val finalSource: MediaSource = if (!subtitleUrl.isNullOrBlank()) {
+            subtitleDataSourceFactory.extraHeaders = headers
+            // We always serve WebVTT bytes, so pin the MIME type — otherwise
+            // ExoPlayer infers it from the remote ".srt" extension and finds
+            // no matching decoder.
+            val subtitleItem = MediaItem.Builder()
+                .setUri(subtitleUrl)
+                .setMimeType(MimeTypes.TEXT_VTT)
+                .build()
+            val subtitleSource = SingleSampleMediaSource.Factory(subtitleDataSourceFactory)
+                .setTrackSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                .createMediaSource(subtitleItem)
+            MergingMediaSource(videoSource, subtitleSource)
+        } else {
+            videoSource
+        }
+
+        player.setMediaSource(finalSource)
         player.prepare()
     }
 
@@ -124,6 +202,7 @@ class MovieBoxPlayer private constructor(private val context: Context) {
         player.stop()
         player.clearMediaItems()
         currentSource = null
+        subtitleTrackIndex = -1
     }
 
     /** Sets volume (0.0 to 1.0). */
@@ -133,6 +212,7 @@ class MovieBoxPlayer private constructor(private val context: Context) {
 
     companion object {
         /** Creates a MovieBoxPlayer instance. */
-        fun create(context: Context): MovieBoxPlayer = MovieBoxPlayer(context)
+        fun create(context: Context): MovieBoxPlayer =
+            MovieBoxPlayer(context, SubtitleDataSourceFactory())
     }
 }

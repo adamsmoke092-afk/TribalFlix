@@ -309,7 +309,9 @@ class MovieBoxClient(
 
             // 2. Direct MP4 resources
             val directStreams = mutableListOf<PlayableSource>()
-            var subtitleTracks = emptyList<CaptionTrack>()
+            // Caption cache keyed by resourceId — captions are per-resource,
+            // so fetch once and reuse for every stream sharing that id.
+            val captionCache = mutableMapOf<String, List<CaptionTrack>>()
 
             try {
                 val resData = getResources(subjectId, season, episode, page = 1, perPage = 20)
@@ -347,6 +349,16 @@ class MovieBoxClient(
                         }
 
                         if (resolvedLink.isNotBlank() && !isPlaceholderUrl(resolvedLink)) {
+                            // Pick the best caption track for this resource:
+                            // English preferred, else the first available.
+                            val captionUrl = captionCache.getOrPut(resId) {
+                                if (resId.isBlank()) emptyList() else getExtCaptions(subjectId, resId)
+                            }
+                            val subtitleUrl = captionUrl
+                                .firstOrNull { it.language.lowercase().contains("en") }
+                                ?.url
+                                ?: captionUrl.firstOrNull()?.url
+
                             directStreams.add(PlayableSource(
                                 id = resId,
                                 format = "direct",
@@ -359,13 +371,9 @@ class MovieBoxClient(
                                 referer = "",
                                 userAgent = deviceProfile.userAgent,
                                 resourceId = resId.takeIf { it.isNotBlank() },
-                                sizeBytes = item.optLong("size")
+                                sizeBytes = item.optLong("size"),
+                                subtitleUrl = subtitleUrl
                             ))
-                        }
-
-                        if (resId.isNotBlank() && subtitleTracks.isEmpty()) {
-                            val captions = getExtCaptions(subjectId, resId)
-                            if (captions.isNotEmpty()) subtitleTracks = captions
                         }
                     }
                 }
@@ -379,7 +387,7 @@ class MovieBoxClient(
                 episode = episode,
                 dashStreams = dashStreams,
                 directStreams = directStreams,
-                subtitles = subtitleTracks
+                subtitles = emptyList() // subtitles are now per-source via subtitleUrl
             )
         }
 
