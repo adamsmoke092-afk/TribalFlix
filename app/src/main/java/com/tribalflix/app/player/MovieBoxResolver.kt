@@ -91,4 +91,30 @@ class MovieBoxResolver(private val client: MovieBoxClient) {
         source.cookie?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
         return headers
     }
+
+    /**
+     * Playable options for the quality picker, best first:
+     * "Auto" (DASH adaptive) when available, then each direct MP4 by
+     * resolution descending. Duplicate resolution labels are de-duped so the
+     * picker shows one entry per quality.
+     */
+    fun qualityOptions(movie: ResolvedMovie): List<QualityOption> {
+        val options = mutableListOf<QualityOption>()
+        movie.dashSources.firstOrNull()?.let { options.add(QualityOption("Auto", it)) }
+
+        val seen = mutableSetOf<String>()
+        movie.directSources
+            .sortedByDescending { resolutionRank(it) }
+            .forEach { src ->
+                val label = src.resolutions.firstOrNull() ?: "?"
+                if (seen.add(label)) options.add(QualityOption(label, src))
+            }
+        return options
+    }
+
+    private fun resolutionRank(src: PlayableSource): Int =
+        src.resolutions.firstOrNull()?.removeSuffix("p")?.toIntOrNull() ?: 0
 }
+
+/** One entry in the quality picker: a label ("Auto", "1080p", …) + its source. */
+data class QualityOption(val label: String, val source: PlayableSource)

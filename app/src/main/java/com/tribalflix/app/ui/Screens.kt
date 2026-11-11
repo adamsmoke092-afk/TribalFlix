@@ -2,6 +2,7 @@ package com.tribalflix.app.ui
 
 import android.widget.Toast
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +31,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -347,50 +349,56 @@ private fun DetailsScreen(
             }
 
             item {
-                val bestDash = resolver.selectBestDash(movie.dashSources)
-                val bestDirect = resolver.selectBestDirect(movie.directSources)
-                val best = bestDash ?: bestDirect
+                val options = remember(movie) { resolver.qualityOptions(movie) }
+                // Default to the best DIRECT MP4 rather than "Auto"/DASH:
+                // DASH playback is not yet confirmed on-device, so the proven
+                // progressive path is the safer default for the Play button.
+                var selectedLabel by remember(movie) {
+                    mutableStateOf(
+                        options.firstOrNull { it.source.format == "direct" }?.label
+                            ?: options.firstOrNull()?.label
+                    )
+                }
+                val selected = options.firstOrNull { it.label == selectedLabel } ?: options.firstOrNull()
 
-                if (best != null) {
+                if (selected != null) {
                     Spacer(modifier = Modifier.height(16.dp))
+                    Text(text = "Quality", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        options.forEach { option ->
+                            FilterChip(
+                                selected = option.label == selected.label,
+                                onClick = { selectedLabel = option.label },
+                                label = { Text(text = option.label) }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
                     Button(
-                        onClick = { onPlay(best, resolver.headersFor(best)) },
+                        onClick = { onPlay(selected.source, resolver.headersFor(selected.source)) },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(text = "Play")
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (bestDirect != null) {
-                            Button(
-                                onClick = { onPlay(bestDirect, resolver.headersFor(bestDirect)) },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(text = "Direct MP4")
-                            }
-                        }
-                        if (bestDash != null) {
-                            Button(
-                                onClick = { onPlay(bestDash, resolver.headersFor(bestDash)) },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(text = "DASH")
-                            }
-                        }
-                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
-                    if (bestDirect != null) {
+                    // Only a direct MP4 is a real file; a DASH manifest is not
+                    // downloadable (saving it would produce an unusable .mpd).
+                    if (selected.source.format == "direct") {
                         Button(
                             onClick = {
                                 scope.launch {
                                     val result = downloader.startDownload(
-                                        source = bestDirect,
+                                        source = selected.source,
                                         title = movie.title,
-                                        headers = resolver.headersFor(bestDirect),
+                                        headers = resolver.headersFor(selected.source),
                                         subjectId = movie.subjectId
                                     )
                                     val message = result.fold(
@@ -410,10 +418,8 @@ private fun DetailsScreen(
                             Text(text = "Download")
                         }
                     } else {
-                        // A DASH manifest is not a file — saving it would just
-                        // produce an unusable .mpd. Only direct MP4 is downloadable.
                         Text(
-                            text = "DASH only — no direct file to download.",
+                            text = "Auto (DASH) — pick a resolution to download a file.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
