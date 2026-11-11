@@ -82,13 +82,17 @@ import kotlinx.coroutines.launch
 @Composable
 fun NavigationHost(
     viewModel: MovieBoxViewModel,
-    player: MovieBoxPlayer
+    player: MovieBoxPlayer,
+    isInPip: Boolean,
+    onEnterPip: () -> Unit
 ) {
     val state by viewModel.state.collectAsState()
 
     var query by remember { mutableStateOf("") }
     var playingSource by remember { mutableStateOf<PlayableSource?>(null) }
     var playingHeaders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var playingTitle by remember { mutableStateOf<String?>(null) }
+    var playingArtwork by remember { mutableStateOf<String?>(null) }
     val resolver = remember { MovieBoxResolver(MovieBoxClient()) }
 
     val activeSource = playingSource
@@ -97,6 +101,10 @@ fun NavigationHost(
             player = player,
             source = activeSource,
             headers = playingHeaders,
+            title = playingTitle,
+            artworkUri = playingArtwork,
+            isInPip = isInPip,
+            onEnterPip = onEnterPip,
             onBack = {
                 player.stop()
                 playingSource = null
@@ -105,10 +113,13 @@ fun NavigationHost(
         return
     }
 
-    val play: (PlayableSource, Map<String, String>) -> Unit = { source, headers ->
-        playingSource = source
-        playingHeaders = headers
-    }
+    val play: (PlayableSource, Map<String, String>, String?, String?) -> Unit =
+        { source, headers, title, artwork ->
+            playingSource = source
+            playingHeaders = headers
+            playingTitle = title
+            playingArtwork = artwork
+        }
 
     Scaffold(
         topBar = {
@@ -287,7 +298,7 @@ private fun SearchScreen(
 private fun DetailsScreen(
     movie: ResolvedMovie,
     resolver: MovieBoxResolver,
-    onPlay: (PlayableSource, Map<String, String>) -> Unit,
+    onPlay: (PlayableSource, Map<String, String>, String?, String?) -> Unit,
     onLoadEpisode: (String, Int, Int) -> Unit,
     onBack: () -> Unit
 ) {
@@ -382,7 +393,14 @@ private fun DetailsScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
-                        onClick = { onPlay(selected.source, resolver.headersFor(selected.source)) },
+                        onClick = {
+                            onPlay(
+                                selected.source,
+                                resolver.headersFor(selected.source),
+                                movie.title,
+                                movie.poster
+                            )
+                        },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(text = "Play")
@@ -497,6 +515,10 @@ private fun PlayerScreen(
     player: MovieBoxPlayer,
     source: PlayableSource,
     headers: Map<String, String>,
+    title: String?,
+    artworkUri: String?,
+    isInPip: Boolean,
+    onEnterPip: () -> Unit,
     onBack: () -> Unit
 ) {
     var errorText by remember { mutableStateOf<String?>(null) }
@@ -517,7 +539,8 @@ private fun PlayerScreen(
     LaunchedEffect(source.url) {
         errorText = null
         try {
-            player.play(source, headers)
+            // Title/artwork feed the lock-screen + notification metadata.
+            player.play(source, headers, title, artworkUri)
         } catch (e: Exception) {
             // A missing media module or unsupported manifest surfaces here.
             errorText = "${e.javaClass.simpleName}: ${e.message}"
@@ -527,25 +550,40 @@ private fun PlayerScreen(
     Box(modifier = Modifier.fillMaxSize().padding(8.dp)) {
         AndroidView(
             factory = { ctx -> PlayerView(ctx).also { it.useController = true } },
-            update = { view -> view.player = player.exoPlayer },
+            update = { view ->
+                view.player = player.exoPlayer
+                // In PiP the system draws its own minimal chrome; hide the
+                // in-app controller so it doesn't overlap the small window.
+                view.useController = !isInPip
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
                 .align(Alignment.Center)
         )
 
-        IconButton(
-            onClick = onBack,
-            modifier = Modifier.align(Alignment.TopStart)
-        ) {
-            Icon(
-                Icons.Default.ArrowBack,
-                contentDescription = "Back",
-                tint = Color.White
-            )
+        if (!isInPip) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.align(Alignment.TopStart)
+            ) {
+                Icon(
+                    Icons.Default.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White
+                )
+            }
+
+            // Enter Picture-in-Picture (only meaningful while playing).
+            TextButton(
+                onClick = onEnterPip,
+                modifier = Modifier.align(Alignment.BottomEnd)
+            ) {
+                Text(text = "PiP", color = Color.White)
+            }
         }
 
-        if (hasSubtitles) {
+        if (hasSubtitles && !isInPip) {
             // The sidecar track is merged into the source; toggling rebuilds
             // the media source with the track enabled or disabled.
             TextButton(

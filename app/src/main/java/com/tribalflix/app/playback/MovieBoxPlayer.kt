@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -56,6 +57,10 @@ class MovieBoxPlayer private constructor(
         .build()
 
     private var currentSource: PlayableSource? = null
+    // Remembered so a media-source rebuild (e.g. toggling subtitles) keeps the
+    // lock-screen metadata instead of blanking it.
+    private var currentTitle: String? = null
+    private var currentArtwork: String? = null
 
     /** Subtitle tracks available for the current source, or empty list. */
     val subtitleTracks: List<CaptionTrack>
@@ -124,7 +129,7 @@ class MovieBoxPlayer private constructor(
         currentSource?.let { source ->
             val position = player.currentPosition
             val wasPlaying = player.playWhenReady
-            load(source, headersFor(source))
+            load(source, headersFor(source), currentTitle, currentArtwork)
             player.seekTo(position)
             player.playWhenReady = wasPlaying
         }
@@ -142,8 +147,15 @@ class MovieBoxPlayer private constructor(
     }
 
     /** Loads a playable source with its required headers and optional subtitle. */
-    fun load(source: PlayableSource, headers: Map<String, String>) {
+    fun load(
+        source: PlayableSource,
+        headers: Map<String, String>,
+        title: String? = null,
+        artworkUri: String? = null
+    ) {
         currentSource = source
+        currentTitle = title
+        currentArtwork = artworkUri
         val subtitleUrl = source.subtitleUrl
         // Default to subtitles ON when the source carries a track.
         subtitleTrackIndex = if (!subtitleUrl.isNullOrBlank()) 0 else -1
@@ -153,7 +165,17 @@ class MovieBoxPlayer private constructor(
         httpDataSourceFactory.setUserAgent(source.userAgent)
         httpDataSourceFactory.setDefaultRequestProperties(headers)
 
-        val videoItem = MediaItem.fromUri(source.url)
+        // Metadata powers the lock-screen / notification title + artwork.
+        val metadata = MediaMetadata.Builder()
+            .setTitle(title ?: source.id.ifBlank { "TribalFlix" })
+            .apply {
+                artworkUri?.takeIf { it.isNotBlank() }?.let { setArtworkUri(Uri.parse(it)) }
+            }
+            .build()
+        val videoItem = MediaItem.Builder()
+            .setUri(source.url)
+            .setMediaMetadata(metadata)
+            .build()
         val videoSource = mediaSourceFactory.createMediaSource(videoItem)
 
         val finalSource: MediaSource = if (!subtitleUrl.isNullOrBlank()) {
@@ -181,8 +203,13 @@ class MovieBoxPlayer private constructor(
     }
 
     /** Loads a playable source and starts playback immediately. */
-    fun play(source: PlayableSource, headers: Map<String, String>) {
-        load(source, headers)
+    fun play(
+        source: PlayableSource,
+        headers: Map<String, String>,
+        title: String? = null,
+        artworkUri: String? = null
+    ) {
+        load(source, headers, title, artworkUri)
         player.playWhenReady = true
     }
 
