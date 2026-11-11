@@ -1,5 +1,6 @@
 package com.tribalflix.app.playback
 
+import android.net.Uri
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
@@ -58,15 +59,19 @@ class SubtitleDataSourceFactory(
 
         private var stream: InputStream? = null
         private var ended = false
+        private var currentUri: Uri? = null
 
         override fun open(dataSpec: DataSpec): Long {
             transferInitializing(dataSpec)
             val uri = dataSpec.uri ?: throw IOException("No subtitle URI")
+            currentUri = uri
             val bytes = fetchAndConvert(uri.toString())
             stream = ByteArrayInputStream(bytes)
             transferStarted(dataSpec)
             return bytes.size.toLong()
         }
+
+        override fun getUri(): Uri? = currentUri
 
         override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
             val read = stream?.read(buffer, offset, length) ?: -1

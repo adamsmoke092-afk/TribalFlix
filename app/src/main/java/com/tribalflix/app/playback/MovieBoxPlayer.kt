@@ -165,7 +165,6 @@ class MovieBoxPlayer private constructor(
                 .setMimeType(MimeTypes.TEXT_VTT)
                 .build()
             val subtitleSource = SingleSampleMediaSource.Factory(subtitleDataSourceFactory)
-                .setTrackSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                 .createMediaSource(subtitleItem)
             MergingMediaSource(videoSource, subtitleSource)
         } else {
